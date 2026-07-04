@@ -403,6 +403,30 @@ async function main() {
   if (!persisted) return fail("Record did not persist across reload (IndexedDB).");
   log("Step 5: record persisted across reload (IndexedDB).");
 
+  // ---- lightbox on saved thumbnail ----
+  await page.click(".rec .thumb");
+  await page.waitForSelector(".lightbox img", { timeout: 5000 });
+  const lbSrcOk = await page.evaluate(() => {
+    const img = document.querySelector(".lightbox img");
+    return !!img && img.src.startsWith("data:image/");
+  });
+  if (!lbSrcOk) return fail("Lightbox image did not show the saved data URL.");
+  await page.click(".lightbox");
+  await page.waitForFunction(() => !document.querySelector(".lightbox"), { timeout: 5000 });
+  log("Step 5b: thumbnail tap opened the lightbox; tap closed it.");
+
+  // ---- re-OCR from a saved record ----
+  await page.getByText("再読み取り", { exact: true }).click();
+  await page.waitForSelector(".crop-stage", { timeout: 10000 });
+  const backToCapture = await page.evaluate(() =>
+    document.querySelector("header .nav button.active").textContent.includes("撮影"));
+  if (!backToCapture) return fail("再読み取り did not switch to the capture view.");
+  await expandCropToFull();
+  await page.getByText("この範囲を読み取る", { exact: true }).click();
+  await assertResult("Re-OCR-from-saved", "KX[-—_ ]?1234AB", "98765");
+  log("Step 5c: 再読み取り re-ran OCR from the saved image (crop stage + text matched).");
+  await page.getByText("破棄", { exact: true }).click();
+
   // ---- Japanese OCR mode ----
   const cjkFamily = detectCjkFont();
   log(cjkFamily

@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-ylqbTvLSIUXuWYEQFsUI8f62vqiK0rn4JVACF9B6qJA=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-QlSLAaWFOz6TxskYlicws6p2yla/iKapo8FHj5R8FZ8='; img-src 'self' blob: data:; connect-src https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-Mu3A+F10UUzgYPCI/KdInEWKRvwR1YZgEHAU/MdRFuw=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-TklD+Fza0u2ow+wSfyw4afKuvChezEKsz1KCWC6lRJ0='; img-src 'self' blob: data:; connect-src https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
 <title>ラベルOCR</title>
 <style>
 :root{
@@ -113,6 +113,13 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
 .spinner{ width:20px; height:20px; border:3px solid rgba(255,255,255,.4);
   border-top-color:#fff; border-radius:50%; animation:spin .8s linear infinite; }
 @keyframes spin{ to{ transform:rotate(360deg); } }
+.rec .thumb{ cursor:zoom-in; }
+.lightbox{ position:fixed; inset:0; z-index:100; background:rgba(0,0,0,.88);
+  display:flex; align-items:center; justify-content:center; padding:16px; cursor:zoom-out; }
+.lightbox img{ max-width:100%; max-height:100%; object-fit:contain; border-radius:8px; }
+.lightbox-close{ position:absolute; top:calc(env(safe-area-inset-top) + 12px); right:12px;
+  min-width:44px; min-height:44px; border:none; border-radius:22px;
+  background:rgba(255,255,255,.18); color:#fff; font-size:22px; line-height:1; }
 .toast{ position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom) + 20px);
   transform:translateX(-50%); background:var(--fg); color:var(--bg); padding:10px 16px;
   border-radius:20px; font-size:14px; font-weight:600; z-index:50; max-width:90%; }
@@ -1348,6 +1355,21 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
         showToast(ok ? "コピーしました" : "コピーに失敗しました");
       }
 
+      // ---- lightbox & re-OCR from a saved record ----
+      const lightboxUrl = ref("");
+
+      // Saved images are the <=800px storage JPEGs, so a re-run works from
+      // that resolution (not the original camera photo).
+      async function reOcrRecord(rec) {
+        try {
+          const blob = await (await fetch(rec.imageDataUrl)).blob();
+          view.value = "capture";
+          await handleBlob(blob);
+        } catch (e) {
+          showToast("画像の読み込みに失敗しました");
+        }
+      }
+
       // ---- calendar / grouping ----
       const countsByDate = computed(() => {
         const m = {};
@@ -1503,12 +1525,16 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
 
       function renderRecord(rec) {
         return h("div", { class: "rec", key: rec.id }, [
-          h("img", { class: "thumb", src: rec.imageDataUrl, alt: "" }),
+          h("img", {
+            class: "thumb", src: rec.imageDataUrl, alt: "保存した画像(タップで拡大)",
+            onClick: () => { lightboxUrl.value = rec.imageDataUrl; }
+          }),
           h("div", { class: "body" }, [
             h("div", { class: "time" }, timeLabel(rec.createdAt)),
             h("div", { class: "txt" }, rec.text || "(テキストなし)"),
             h("div", { class: "acts" }, [
               h("button", { onClick: () => copyRecord(rec) }, "コピー"),
+              h("button", { onClick: () => reOcrRecord(rec) }, "再読み取り"),
               h("button", { class: "del", onClick: () => deleteRecord(rec) }, "削除")
             ])
           ])
@@ -1570,6 +1596,12 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
           ])
         ]),
         h("main", {}, view.value === "capture" ? renderCapture() : renderList()),
+        lightboxUrl.value
+          ? h("div", { class: "lightbox", onClick: () => { lightboxUrl.value = ""; } }, [
+              h("img", { src: lightboxUrl.value, alt: "保存した画像" }),
+              h("button", { class: "lightbox-close", "aria-label": "閉じる" }, "✕")
+            ])
+          : null,
         toast.value ? h("div", { class: "toast" }, toast.value) : null
       ]);
     }
