@@ -1,0 +1,5 @@
+node_modules/
+# ローカル検証用のCDNキャッシュ（npmから自動再生成されるため追跡しない）
+tools/.cdncache/
+*.log
+.DS_Store

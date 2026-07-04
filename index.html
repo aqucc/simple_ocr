@@ -1,0 +1,581 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-SumDds5xMwhzG51ZE77a5ySBEe/UXO+rUX0Ysl+eOSA=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-ZDmKrqNDvLuI+npN05l38bWm2J2dwIokmZDv0nJ9F1I='; img-src 'self' blob: data:; connect-src https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
+<title>ラベルOCR</title>
+<style>
+:root{
+  --bg:#0f1115; --panel:#1a1d24; --panel2:#232732; --line:#2e3440;
+  --fg:#e8eaf0; --muted:#9aa3b2; --accent:#4c8dff; --accent2:#2f6fe0;
+  --danger:#ff5a5f; --ok:#37c871; --radius:14px;
+}
+@media (prefers-color-scheme: light){
+  :root{ --bg:#f2f4f8; --panel:#ffffff; --panel2:#eef1f6; --line:#d8dee9;
+    --fg:#1a1d24; --muted:#5b6472; --accent:#2f6fe0; --accent2:#1f5bc4; }
+}
+*{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+html,body{ margin:0; padding:0; background:var(--bg); color:var(--fg);
+  font-family:-apple-system,BlinkMacSystemFont,"Hiragino Kaku Gothic ProN","Yu Gothic",Meiryo,sans-serif;
+  font-size:16px; line-height:1.5; }
+#app{ max-width:680px; margin:0 auto; min-height:100vh; display:flex; flex-direction:column; }
+header{ position:sticky; top:0; z-index:10; background:var(--panel);
+  border-bottom:1px solid var(--line);
+  padding:calc(env(safe-area-inset-top) + 8px) 12px 8px; }
+header h1{ font-size:17px; margin:0 0 8px; text-align:center; font-weight:700; }
+.nav{ display:flex; gap:8px; }
+.nav button{ flex:1; min-height:44px; border:1px solid var(--line); background:var(--panel2);
+  color:var(--fg); border-radius:10px; font-size:15px; font-weight:600; }
+.nav button.active{ background:var(--accent); border-color:var(--accent); color:#fff; }
+main{ flex:1; padding:14px 12px calc(env(safe-area-inset-bottom) + 28px); }
+.card{ background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+  padding:14px; margin-bottom:14px; }
+.btn{ display:flex; align-items:center; justify-content:center; gap:8px;
+  width:100%; min-height:52px; border:none; border-radius:12px; font-size:16px;
+  font-weight:700; color:#fff; background:var(--accent); margin:0; }
+.btn:active{ background:var(--accent2); }
+.btn.sec{ background:var(--panel2); color:var(--fg); border:1px solid var(--line); }
+.btn.danger{ background:var(--danger); }
+.btn.ok{ background:var(--ok); }
+.btn-row{ display:flex; gap:10px; }
+.btn-row .btn{ flex:1; }
+.hidden-file{ position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
+label.filebtn{ cursor:pointer; }
+.hint{ color:var(--muted); font-size:13px; margin:8px 2px 0; }
+.err{ background:rgba(255,90,95,.14); border:1px solid var(--danger); color:var(--danger);
+  padding:10px 12px; border-radius:10px; font-size:14px; margin-bottom:12px; white-space:pre-wrap; }
+.preview{ width:100%; border-radius:10px; display:block; background:var(--panel2);
+  border:1px solid var(--line); max-height:46vh; object-fit:contain; }
+textarea{ width:100%; min-height:120px; resize:vertical; background:var(--panel2);
+  color:var(--fg); border:1px solid var(--line); border-radius:10px; padding:10px;
+  font-size:16px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+.progwrap{ margin:10px 0; }
+.progbar{ height:12px; background:var(--panel2); border:1px solid var(--line);
+  border-radius:8px; overflow:hidden; }
+.progfill{ height:100%; background:var(--accent); transition:width .2s ease; }
+.progtxt{ font-size:13px; color:var(--muted); margin-top:6px; text-align:center; }
+.conf{ font-size:13px; color:var(--muted); margin:8px 2px; }
+h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700; }
+.cal{ background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
+  padding:12px; margin-bottom:14px; }
+.calhead{ display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
+.calhead .mlabel{ font-weight:700; font-size:15px; }
+.calnav{ min-width:44px; min-height:44px; border:1px solid var(--line); background:var(--panel2);
+  color:var(--fg); border-radius:10px; font-size:18px; }
+.calgrid{ display:grid; grid-template-columns:repeat(7,1fr); gap:4px; }
+.caldow{ text-align:center; font-size:12px; color:var(--muted); padding:4px 0; }
+.calcell{ position:relative; aspect-ratio:1/1; border:1px solid transparent; border-radius:9px;
+  background:transparent; color:var(--fg); font-size:14px; display:flex;
+  align-items:center; justify-content:center; }
+.calcell.has{ background:var(--panel2); border-color:var(--line); font-weight:700; }
+.calcell.sel{ background:var(--accent); color:#fff; border-color:var(--accent); }
+.calcell.empty{ background:transparent; }
+.caldot{ position:absolute; bottom:4px; left:50%; transform:translateX(-50%);
+  min-width:15px; height:15px; padding:0 3px; border-radius:8px; background:var(--accent);
+  color:#fff; font-size:10px; line-height:15px; text-align:center; }
+.calcell.sel .caldot{ background:#fff; color:var(--accent); }
+.datehdr{ font-size:14px; font-weight:700; color:var(--muted); margin:16px 2px 8px;
+  padding-bottom:6px; border-bottom:1px solid var(--line); }
+.rec{ display:flex; gap:12px; }
+.rec .thumb{ width:74px; height:74px; flex:0 0 74px; border-radius:10px; object-fit:cover;
+  background:var(--panel2); border:1px solid var(--line); }
+.rec .body{ flex:1; min-width:0; }
+.rec .time{ font-size:12px; color:var(--muted); }
+.rec .txt{ white-space:pre-wrap; word-break:break-word; font-family:ui-monospace,Menlo,monospace;
+  font-size:14px; margin:4px 0 8px; }
+.rec .acts{ display:flex; gap:8px; }
+.rec .acts button{ flex:1; min-height:40px; border-radius:9px; border:1px solid var(--line);
+  background:var(--panel2); color:var(--fg); font-size:14px; font-weight:600; }
+.rec .acts button.del{ color:var(--danger); border-color:var(--danger); }
+.empty-note{ text-align:center; color:var(--muted); padding:30px 10px; }
+.spinner{ width:20px; height:20px; border:3px solid rgba(255,255,255,.4);
+  border-top-color:#fff; border-radius:50%; animation:spin .8s linear infinite; }
+@keyframes spin{ to{ transform:rotate(360deg); } }
+.toast{ position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom) + 20px);
+  transform:translateX(-50%); background:var(--fg); color:var(--bg); padding:10px 16px;
+  border-radius:20px; font-size:14px; font-weight:600; z-index:50; max-width:90%; }
+</style>
+<div id="app"></div>
+<script src="https://cdn.jsdelivr.net/npm/vue@3.4.38/dist/vue.runtime.global.prod.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script>
+"use strict";
+(function () {
+  const { createApp, h, ref, computed, onMounted } = Vue;
+
+  // ---- Pinned CDN dependency paths (Tesseract runtime assets) ----
+  const TESS = {
+    workerPath: "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/worker.min.js",
+    corePath: "https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1",
+    langPath: "https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int"
+  };
+
+  // ---------------- IndexedDB ----------------
+  const DB_NAME = "label_ocr_db", STORE = "records", DB_VER = 1;
+  function openDB() {
+    return new Promise((res, rej) => {
+      const r = indexedDB.open(DB_NAME, DB_VER);
+      r.onupgradeneeded = () => {
+        const db = r.result;
+        if (!db.objectStoreNames.contains(STORE)) {
+          const os = db.createObjectStore(STORE, { keyPath: "id" });
+          os.createIndex("dateKey", "dateKey", { unique: false });
+        }
+      };
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error || new Error("IndexedDB open failed"));
+    });
+  }
+  async function dbPut(rec) {
+    const db = await openDB();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(STORE, "readwrite");
+      tx.objectStore(STORE).put(rec);
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error || new Error("保存に失敗しました"));
+    });
+  }
+  async function dbAll() {
+    const db = await openDB();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(STORE, "readonly");
+      const rq = tx.objectStore(STORE).getAll();
+      rq.onsuccess = () => res(rq.result || []);
+      rq.onerror = () => rej(rq.error || new Error("読み込みに失敗しました"));
+    });
+  }
+  async function dbDelete(id) {
+    const db = await openDB();
+    return new Promise((res, rej) => {
+      const tx = db.transaction(STORE, "readwrite");
+      tx.objectStore(STORE).delete(id);
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error || new Error("削除に失敗しました"));
+    });
+  }
+
+  // ---------------- Date helpers ----------------
+  function pad2(n) { return n < 10 ? "0" + n : "" + n; }
+  function localDateKey(d) { return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()); }
+  function timeLabel(iso) {
+    const d = new Date(iso);
+    return pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+  }
+  function dateHeaderLabel(key) {
+    const p = key.split("-");
+    const d = new Date(+p[0], +p[1] - 1, +p[2]);
+    const dow = ["日", "月", "火", "水", "木", "金", "土"][d.getDay()];
+    return p[0] + "年" + (+p[1]) + "月" + (+p[2]) + "日 (" + dow + ")";
+  }
+
+  // ---------------- Image loading (EXIF-aware) ----------------
+  async function loadBitmap(blob) {
+    if (typeof createImageBitmap === "function") {
+      try { return await createImageBitmap(blob, { imageOrientation: "from-image" }); }
+      catch (e) { /* fall back below */ }
+      try { return await createImageBitmap(blob); }
+      catch (e) { /* fall back below */ }
+    }
+    return await new Promise((res, rej) => {
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => { URL.revokeObjectURL(url); res(img); };
+      img.onerror = () => { URL.revokeObjectURL(url); rej(new Error("画像の読み込みに失敗しました")); };
+      img.src = url;
+    });
+  }
+  function dims(src) {
+    return { w: src.width || src.naturalWidth, h: src.height || src.naturalHeight };
+  }
+
+  // Draw source into a canvas scaled so the longest side <= maxSide.
+  function drawScaled(src, maxSide) {
+    const { w, h } = dims(src);
+    const scale = Math.min(1, maxSide / Math.max(w, h));
+    const cw = Math.max(1, Math.round(w * scale));
+    const ch = Math.max(1, Math.round(h * scale));
+    const c = document.createElement("canvas");
+    c.width = cw; c.height = ch;
+    const ctx = c.getContext("2d");
+    ctx.drawImage(src, 0, 0, cw, ch);
+    return c;
+  }
+
+  // Preprocess for OCR: downscale, grayscale, percentile contrast stretch.
+  function preprocess(src) {
+    const c = drawScaled(src, 1600);
+    const ctx = c.getContext("2d");
+    const img = ctx.getImageData(0, 0, c.width, c.height);
+    const d = img.data;
+    const n = d.length / 4;
+    const gray = new Uint8ClampedArray(n);
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < n; i++) {
+      const r = d[i * 4], g = d[i * 4 + 1], b = d[i * 4 + 2];
+      const y = (r * 0.299 + g * 0.587 + b * 0.114) | 0;
+      gray[i] = y; hist[y]++;
+    }
+    // 2nd / 98th percentile bounds for a robust contrast stretch.
+    const lowCut = n * 0.02, highCut = n * 0.98;
+    let acc = 0, lo = 0, hi = 255;
+    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= lowCut) { lo = v; break; } }
+    acc = 0;
+    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= highCut) { hi = v; break; } }
+    if (hi <= lo) { lo = 0; hi = 255; }
+    const range = hi - lo;
+    for (let i = 0; i < n; i++) {
+      let v = (gray[i] - lo) * 255 / range;
+      v = v < 0 ? 0 : v > 255 ? 255 : v;
+      d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = v;
+      d[i * 4 + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+    return c;
+  }
+
+  // Reasonably sized JPEG data URL for storage / preview.
+  function toStorageDataUrl(src) {
+    return drawScaled(src, 800).toDataURL("image/jpeg", 0.7);
+  }
+
+  // ---------------- Tesseract worker ----------------
+  let tessWorker = null;
+  async function getWorker(onLog) {
+    if (tessWorker) return tessWorker;
+    if (typeof Tesseract === "undefined") throw new Error("OCRエンジンの読み込みに失敗しました");
+    tessWorker = await Tesseract.createWorker("eng", 1 /* OEM.LSTM_ONLY */, {
+      workerPath: TESS.workerPath,
+      corePath: TESS.corePath,
+      langPath: TESS.langPath,
+      logger: onLog
+    });
+    return tessWorker;
+  }
+  function mapStatus(s) {
+    if (!s) return "処理中…";
+    if (s.indexOf("core") >= 0) return "エンジンを読み込み中…";
+    if (s.indexOf("lang") >= 0 || s.indexOf("traineddata") >= 0) return "言語データを読み込み中…";
+    if (s.indexOf("initializ") >= 0) return "初期化中…";
+    if (s.indexOf("recognizing") >= 0) return "認識中…";
+    if (s.indexOf("loading") >= 0) return "読み込み中…";
+    return "処理中…";
+  }
+
+  // ---------------- Clipboard helpers ----------------
+  async function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* fall through */ }
+    }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.focus(); ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch (e) { return false; }
+  }
+
+  // ========================================================
+  const App = {
+    setup() {
+      const view = ref("capture");          // 'capture' | 'list'
+      const toast = ref("");
+      let toastTimer = null;
+      function showToast(msg) {
+        toast.value = msg;
+        if (toastTimer) clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => { toast.value = ""; }, 1800);
+      }
+
+      // ---- capture state ----
+      const stage = ref("input");           // 'input' | 'processing' | 'result'
+      const captureErr = ref("");
+      const previewUrl = ref("");           // data URL for preview (also stored)
+      const ocrText = ref("");
+      const ocrConf = ref(null);
+      const progress = ref(0);
+      const progStatus = ref("");
+      let currentBitmap = null;             // non-reactive
+
+      // ---- list state ----
+      const records = ref([]);
+      const listErr = ref("");
+      const filterDate = ref(null);
+      const today = new Date();
+      const calY = ref(today.getFullYear());
+      const calM = ref(today.getMonth());   // 0-based
+
+      async function refreshRecords() {
+        try {
+          const all = await dbAll();
+          all.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+          records.value = all;
+          listErr.value = "";
+        } catch (e) { listErr.value = "記録の読み込みに失敗しました: " + e.message; }
+      }
+
+      // ---- OCR pipeline ----
+      async function handleBlob(blob) {
+        captureErr.value = "";
+        if (!blob || (blob.type && blob.type.indexOf("image") !== 0)) {
+          captureErr.value = "画像ファイルを選択してください。";
+          return;
+        }
+        stage.value = "processing";
+        progress.value = 0;
+        progStatus.value = "画像を準備中…";
+        ocrText.value = ""; ocrConf.value = null;
+        try {
+          currentBitmap = await loadBitmap(blob);
+          previewUrl.value = toStorageDataUrl(currentBitmap);
+          const canvas = preprocess(currentBitmap);
+          const worker = await getWorker((m) => {
+            progStatus.value = mapStatus(m.status);
+            if (typeof m.progress === "number") progress.value = m.progress;
+          });
+          progStatus.value = "認識中…";
+          const { data } = await worker.recognize(canvas);
+          ocrText.value = (data && data.text ? data.text : "").replace(/\n{3,}/g, "\n\n").trim();
+          ocrConf.value = data && typeof data.confidence === "number" ? Math.round(data.confidence) : null;
+          stage.value = "result";
+        } catch (e) {
+          captureErr.value = "文字認識に失敗しました: " + (e && e.message ? e.message : e);
+          stage.value = "input";
+        }
+      }
+
+      function onFileInput(ev) {
+        const f = ev.target.files && ev.target.files[0];
+        ev.target.value = "";
+        if (f) handleBlob(f);
+      }
+
+      async function pasteFromClipboard() {
+        captureErr.value = "";
+        if (!navigator.clipboard || !navigator.clipboard.read) {
+          captureErr.value = "このブラウザではクリップボードからの読み取りに対応していません。画像を貼り付ける (Ctrl/Cmd+V) か、他のボタンをご利用ください。";
+          return;
+        }
+        try {
+          const items = await navigator.clipboard.read();
+          for (const it of items) {
+            const type = it.types.find((t) => t.indexOf("image") === 0);
+            if (type) { const blob = await it.getType(type); await handleBlob(blob); return; }
+          }
+          captureErr.value = "クリップボードに画像が見つかりませんでした。";
+        } catch (e) {
+          captureErr.value = "クリップボードの読み取りが拒否されました: " + (e && e.message ? e.message : e);
+        }
+      }
+
+      function onPaste(ev) {
+        if (!ev.clipboardData) return;
+        const items = ev.clipboardData.items || [];
+        for (const it of items) {
+          if (it.kind === "file" && it.type.indexOf("image") === 0) {
+            const blob = it.getAsFile();
+            if (blob) { ev.preventDefault(); handleBlob(blob); return; }
+          }
+        }
+      }
+
+      async function saveRecord() {
+        try {
+          const now = new Date();
+          const rec = {
+            id: (now.getTime() + "-" + Math.random().toString(36).slice(2, 8)),
+            createdAt: now.toISOString(),
+            dateKey: localDateKey(now),
+            text: ocrText.value,
+            imageDataUrl: previewUrl.value
+          };
+          await dbPut(rec);
+          await refreshRecords();
+          discard();
+          showToast("保存しました");
+          view.value = "list";
+        } catch (e) {
+          captureErr.value = "保存に失敗しました: " + (e && e.message ? e.message : e);
+        }
+      }
+
+      function discard() {
+        stage.value = "input";
+        previewUrl.value = ""; ocrText.value = ""; ocrConf.value = null;
+        progress.value = 0; progStatus.value = ""; currentBitmap = null;
+      }
+
+      async function deleteRecord(rec) {
+        if (!window.confirm("この記録を削除しますか？")) return;
+        try { await dbDelete(rec.id); await refreshRecords(); showToast("削除しました"); }
+        catch (e) { listErr.value = "削除に失敗しました: " + e.message; }
+      }
+
+      async function copyRecord(rec) {
+        const ok = await copyText(rec.text);
+        showToast(ok ? "コピーしました" : "コピーに失敗しました");
+      }
+
+      // ---- calendar / grouping ----
+      const countsByDate = computed(() => {
+        const m = {};
+        for (const r of records.value) m[r.dateKey] = (m[r.dateKey] || 0) + 1;
+        return m;
+      });
+      const visibleGroups = computed(() => {
+        const groups = {};
+        for (const r of records.value) {
+          if (filterDate.value && r.dateKey !== filterDate.value) continue;
+          (groups[r.dateKey] = groups[r.dateKey] || []).push(r);
+        }
+        return Object.keys(groups).sort().reverse().map((k) => ({ key: k, items: groups[k] }));
+      });
+      const calCells = computed(() => {
+        const y = calY.value, m = calM.value;
+        const first = new Date(y, m, 1).getDay();
+        const days = new Date(y, m + 1, 0).getDate();
+        const cells = [];
+        for (let i = 0; i < first; i++) cells.push(null);
+        for (let d = 1; d <= days; d++) cells.push(y + "-" + pad2(m + 1) + "-" + pad2(d));
+        return cells;
+      });
+      function prevMonth() { if (calM.value === 0) { calM.value = 11; calY.value--; } else calM.value--; }
+      function nextMonth() { if (calM.value === 11) { calM.value = 0; calY.value++; } else calM.value++; }
+
+      onMounted(() => {
+        refreshRecords();
+        window.addEventListener("paste", onPaste);
+      });
+
+      // ---------------- render helpers ----------------
+      function fileButton(labelText, capture) {
+        const attrs = { type: "file", accept: "image/*", class: "hidden-file", onChange: onFileInput };
+        if (capture) attrs.capture = "environment";
+        return h("label", { class: "btn" + (capture ? "" : " sec") + " filebtn" }, [
+          h("input", attrs), labelText
+        ]);
+      }
+
+      function renderCapture() {
+        if (stage.value === "processing") {
+          return h("div", { class: "card" }, [
+            h("div", { class: "progwrap" }, [
+              h("div", { class: "progbar" }, [
+                h("div", { class: "progfill", style: { width: Math.round(progress.value * 100) + "%" } })
+              ]),
+              h("div", { class: "progtxt" }, progStatus.value + " " + Math.round(progress.value * 100) + "%")
+            ]),
+            previewUrl.value ? h("img", { class: "preview", src: previewUrl.value, alt: "" }) : null
+          ]);
+        }
+        if (stage.value === "result") {
+          return h("div", {}, [
+            captureErr.value ? h("div", { class: "err" }, captureErr.value) : null,
+            h("div", { class: "card" }, [
+              h("h2", { class: "sec" }, "認識結果 — 保存しますか？"),
+              h("img", { class: "preview", src: previewUrl.value, alt: "撮影した画像" }),
+              ocrConf.value != null ? h("div", { class: "conf" }, "信頼度: " + ocrConf.value + "%") : null,
+              h("textarea", {
+                value: ocrText.value,
+                onInput: (e) => { ocrText.value = e.target.value; },
+                spellcheck: "false"
+              }),
+              h("div", { class: "btn-row", style: { marginTop: "12px" } }, [
+                h("button", { class: "btn ok", onClick: saveRecord }, "保存する"),
+                h("button", { class: "btn sec", onClick: discard }, "破棄")
+              ])
+            ])
+          ]);
+        }
+        // input stage
+        return h("div", {}, [
+          captureErr.value ? h("div", { class: "err" }, captureErr.value) : null,
+          h("div", { class: "card" }, [
+            h("h2", { class: "sec" }, "ラベルを撮影・選択"),
+            fileButton("カメラで撮影", true),
+            h("div", { style: { height: "10px" } }),
+            fileButton("画像を選択", false),
+            h("div", { style: { height: "10px" } }),
+            h("button", { class: "btn sec", onClick: pasteFromClipboard }, "クリップボードから貼り付け"),
+            h("div", { class: "hint" }, "型番・製造番号のシールを大きく、明るく撮影すると精度が上がります。画像をコピーして Ctrl/Cmd+V でも貼り付けできます。")
+          ])
+        ]);
+      }
+
+      function renderRecord(rec) {
+        return h("div", { class: "rec", key: rec.id }, [
+          h("img", { class: "thumb", src: rec.imageDataUrl, alt: "" }),
+          h("div", { class: "body" }, [
+            h("div", { class: "time" }, timeLabel(rec.createdAt)),
+            h("div", { class: "txt" }, rec.text || "(テキストなし)"),
+            h("div", { class: "acts" }, [
+              h("button", { onClick: () => copyRecord(rec) }, "コピー"),
+              h("button", { class: "del", onClick: () => deleteRecord(rec) }, "削除")
+            ])
+          ])
+        ]);
+      }
+
+      function renderCalendar() {
+        const dow = ["日", "月", "火", "水", "木", "金", "土"];
+        return h("div", { class: "cal" }, [
+          h("div", { class: "calhead" }, [
+            h("button", { class: "calnav", onClick: prevMonth, "aria-label": "前の月" }, "‹"),
+            h("div", { class: "mlabel" }, calY.value + "年 " + (calM.value + 1) + "月"),
+            h("button", { class: "calnav", onClick: nextMonth, "aria-label": "次の月" }, "›")
+          ]),
+          h("div", { class: "calgrid" }, [
+            ...dow.map((d) => h("div", { class: "caldow", key: "dow" + d }, d)),
+            ...calCells.value.map((key, i) => {
+              if (!key) return h("div", { class: "calcell empty", key: "e" + i });
+              const cnt = countsByDate.value[key] || 0;
+              const cls = "calcell" + (cnt ? " has" : "") + (filterDate.value === key ? " sel" : "");
+              const day = +key.split("-")[2];
+              return h("div", {
+                class: cls, key: key,
+                onClick: () => { if (cnt) filterDate.value = (filterDate.value === key ? null : key); }
+              }, [
+                String(day),
+                cnt ? h("span", { class: "caldot" }, String(cnt)) : null
+              ]);
+            })
+          ])
+        ]);
+      }
+
+      function renderList() {
+        return h("div", {}, [
+          listErr.value ? h("div", { class: "err" }, listErr.value) : null,
+          renderCalendar(),
+          filterDate.value
+            ? h("button", { class: "btn sec", style: { marginBottom: "12px" }, onClick: () => { filterDate.value = null; } },
+                dateHeaderLabel(filterDate.value) + " のみ表示中 — すべて表示")
+            : null,
+          visibleGroups.value.length === 0
+            ? h("div", { class: "empty-note" }, "保存された記録はありません。")
+            : visibleGroups.value.map((g) =>
+                h("div", { key: g.key }, [
+                  h("div", { class: "datehdr" }, dateHeaderLabel(g.key)),
+                  ...g.items.map(renderRecord)
+                ])
+              )
+        ]);
+      }
+
+      return () => h("div", {}, [
+        h("header", {}, [
+          h("h1", {}, "ラベルOCR"),
+          h("div", { class: "nav" }, [
+            h("button", { class: view.value === "capture" ? "active" : "", onClick: () => { view.value = "capture"; } }, "撮影"),
+            h("button", { class: view.value === "list" ? "active" : "", onClick: () => { view.value = "list"; refreshRecords(); } }, "一覧")
+          ])
+        ]),
+        h("main", {}, view.value === "capture" ? renderCapture() : renderList()),
+        toast.value ? h("div", { class: "toast" }, toast.value) : null
+      ]);
+    }
+  };
+
+  createApp(App).mount("#app");
+})();
+</script>
