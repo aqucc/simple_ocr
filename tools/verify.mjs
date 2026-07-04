@@ -32,7 +32,7 @@ const globalRoot = execSync("npm root -g").toString().trim();
 const chromeBin = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome";
 
 // ---- pinned assets (must match index.html) ----
-const VER = { vue: "3.4.38", tess: "5.1.1", core: "5.1.1", eng: "1.0.0", jpn: "1.0.0" };
+const VER = { vue: "3.4.38", tess: "5.1.1", core: "5.1.1", eng: "1.0.0", jpn: "1.0.0", ort: "1.19.2", models: "1.4.2" };
 const CACHE_FILES = {
   "vue.runtime.global.prod.js": join(cacheDir, "vue", "vue.runtime.global.prod.js"),
   "tesseract.min.js": join(cacheDir, "tesseract.js", "dist", "tesseract.min.js"),
@@ -42,7 +42,16 @@ const CACHE_FILES = {
   "tesseract-core-simd.wasm.js": join(cacheDir, "tesseract.js-core", "tesseract-core-simd.wasm.js"),
   "tesseract-core-lstm.wasm.js": join(cacheDir, "tesseract.js-core", "tesseract-core-lstm.wasm.js"),
   "eng.traineddata.gz": join(cacheDir, "eng", "eng.traineddata.gz"),
-  "jpn.traineddata.gz": join(cacheDir, "jpn", "jpn.traineddata.gz")
+  "jpn.traineddata.gz": join(cacheDir, "jpn", "jpn.traineddata.gz"),
+  // onnxruntime-web (wasm-only build + its wasm/glue) for the PaddleOCR path
+  "ort.wasm.min.js": join(cacheDir, "onnxruntime-web", "ort.wasm.min.js"),
+  "ort-wasm-simd-threaded.mjs": join(cacheDir, "onnxruntime-web", "ort-wasm-simd-threaded.mjs"),
+  "ort-wasm-simd-threaded.wasm": join(cacheDir, "onnxruntime-web", "ort-wasm-simd-threaded.wasm"),
+  "ort-wasm-simd-threaded.jsep.mjs": join(cacheDir, "onnxruntime-web", "ort-wasm-simd-threaded.jsep.mjs"),
+  "ort-wasm-simd-threaded.jsep.wasm": join(cacheDir, "onnxruntime-web", "ort-wasm-simd-threaded.jsep.wasm"),
+  // PP-OCRv4 recognition model + dictionary (@gutenye/ocr-models)
+  "ch_PP-OCRv4_rec_infer.onnx": join(cacheDir, "ocr-models", "ch_PP-OCRv4_rec_infer.onnx"),
+  "ppocr_keys_v1.txt": join(cacheDir, "ocr-models", "ppocr_keys_v1.txt")
 };
 
 function log(...a) { console.log(...a); }
@@ -78,12 +87,16 @@ function ensureCache() {
   grab("core", `https://registry.npmjs.org/tesseract.js-core/-/tesseract.js-core-${VER.core}.tgz`);
   grab("eng", `https://registry.npmjs.org/@tesseract.js-data/eng/-/eng-${VER.eng}.tgz`);
   grab("jpn", `https://registry.npmjs.org/@tesseract.js-data/jpn/-/jpn-${VER.jpn}.tgz`);
+  grab("ort", `https://registry.npmjs.org/onnxruntime-web/-/onnxruntime-web-${VER.ort}.tgz`);
+  grab("models", `https://registry.npmjs.org/@gutenye/ocr-models/-/ocr-models-${VER.models}.tgz`);
 
   mkdirSync(join(cacheDir, "vue"), { recursive: true });
   mkdirSync(join(cacheDir, "tesseract.js", "dist"), { recursive: true });
   mkdirSync(join(cacheDir, "tesseract.js-core"), { recursive: true });
   mkdirSync(join(cacheDir, "eng"), { recursive: true });
   mkdirSync(join(cacheDir, "jpn"), { recursive: true });
+  mkdirSync(join(cacheDir, "onnxruntime-web"), { recursive: true });
+  mkdirSync(join(cacheDir, "ocr-models"), { recursive: true });
   copyFileSync(join(tmp, "vue", "package", "dist", "vue.runtime.global.prod.js"), CACHE_FILES["vue.runtime.global.prod.js"]);
   copyFileSync(join(tmp, "tess", "package", "dist", "tesseract.min.js"), CACHE_FILES["tesseract.min.js"]);
   copyFileSync(join(tmp, "tess", "package", "dist", "worker.min.js"), CACHE_FILES["worker.min.js"]);
@@ -92,6 +105,11 @@ function ensureCache() {
   }
   copyFileSync(join(tmp, "eng", "package", "4.0.0_best_int", "eng.traineddata.gz"), CACHE_FILES["eng.traineddata.gz"]);
   copyFileSync(join(tmp, "jpn", "package", "4.0.0_best_int", "jpn.traineddata.gz"), CACHE_FILES["jpn.traineddata.gz"]);
+  for (const f of ["ort.wasm.min.js", "ort-wasm-simd-threaded.mjs", "ort-wasm-simd-threaded.wasm", "ort-wasm-simd-threaded.jsep.mjs", "ort-wasm-simd-threaded.jsep.wasm"]) {
+    copyFileSync(join(tmp, "ort", "package", "dist", f), CACHE_FILES[f]);
+  }
+  copyFileSync(join(tmp, "models", "package", "assets", "ch_PP-OCRv4_rec_infer.onnx"), CACHE_FILES["ch_PP-OCRv4_rec_infer.onnx"]);
+  copyFileSync(join(tmp, "models", "package", "assets", "ppocr_keys_v1.txt"), CACHE_FILES["ppocr_keys_v1.txt"]);
   log("CDN cache built.");
 }
 
@@ -137,12 +155,13 @@ async function main() {
     const name = basename(url.pathname);
     const local = CACHE_FILES[name];
     if (local && existsSync(local)) {
-      const isGz = name.endsWith(".gz");
-      await route.fulfill({
-        status: 200,
-        contentType: isGz ? "application/octet-stream" : "text/javascript; charset=utf-8",
-        body: readFileSync(local)
-      });
+      // Correct MIME matters: dynamic import() of .mjs requires a JS type and
+      // WebAssembly.instantiateStreaming requires application/wasm.
+      const mime = name.endsWith(".wasm") ? "application/wasm"
+        : (name.endsWith(".mjs") || name.endsWith(".js")) ? "text/javascript; charset=utf-8"
+        : name.endsWith(".txt") ? "text/plain; charset=utf-8"
+        : "application/octet-stream";
+      await route.fulfill({ status: 200, contentType: mime, body: readFileSync(local) });
     } else {
       unmappedCdn.push(url.pathname);
       await route.abort();
@@ -172,6 +191,31 @@ async function main() {
     process.exit(1);
   };
 
+  // Drag a crop handle (real pointer events) to a target page coordinate.
+  async function dragHandle(sel, tx, ty) {
+    const el = await page.$(sel);
+    if (!el) throw new Error("handle not found: " + sel);
+    const bb = await el.boundingBox();
+    await page.mouse.move(bb.x + bb.width / 2, bb.y + bb.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(tx, ty, { steps: 6 });
+    await page.mouse.up();
+  }
+  // Expand the crop rect to (almost) the whole photo via the corner handles.
+  async function expandCropToFull() {
+    await page.waitForSelector(".crop-stage", { timeout: 15000 });
+    const stage = await (await page.$(".crop-stage")).boundingBox();
+    await dragHandle(".crop-handle.nw", stage.x + 3, stage.y + 3);
+    await dragHandle(".crop-handle.se", stage.x + stage.width - 3, stage.y + stage.height - 3);
+    const r = await page.evaluate(() => {
+      const o = document.querySelector(".crop-overlay");
+      const s = document.querySelector(".crop-stage");
+      const ob = o.getBoundingClientRect(), sb = s.getBoundingClientRect();
+      return { x: (ob.x - sb.x) / sb.width, w: ob.width / sb.width };
+    });
+    if (r.x > 0.1 || r.w < 0.8) throw new Error("crop drag did not expand the rect (x=" + r.x.toFixed(2) + " w=" + r.w.toFixed(2) + ")");
+  }
+
   log(`\nServing ${repoRoot} at ${base}`);
   await page.goto(base + "/index.html", { waitUntil: "load" });
   await page.waitForSelector("header h1", { timeout: 10000 });
@@ -194,24 +238,42 @@ async function main() {
     input.files = dt.files;
     input.dispatchEvent(new Event("change", { bubbles: true }));
   });
-  log("Step 2: label image injected, OCR running...");
+  log("Step 2: label image injected, crop stage should appear...");
 
-  try {
-    await page.waitForSelector("textarea", { timeout: 120000 });
-    await page.waitForFunction(() => {
-      const ta = document.querySelector("textarea");
-      return ta && /KX[-—_ ]?1234AB/i.test(ta.value) && /98765/.test(ta.value);
-    }, { timeout: 120000 });
-  } catch (e) {
-    const ta = await page.evaluate(() => { const t = document.querySelector("textarea"); return t ? t.value : "(no textarea)"; });
-    return fail("OCR text assertion failed. textarea value was:\n" + ta);
-  }
+  // ---- cropped 英数字 path -> PaddleOCR (rec-only) ----
+  await expandCropToFull();
+  log("Step 2b: crop rect expanded to full photo via pointer-event drags.");
+  await page.getByText("この範囲を読み取る", { exact: true }).click();
+  const assertResult = async (label, reKx, reOther) => {
+    try {
+      await page.waitForSelector("textarea", { timeout: 180000 });
+      await page.waitForFunction(([a, b]) => {
+        const ta = document.querySelector("textarea");
+        return ta && new RegExp(a, "i").test(ta.value) && new RegExp(b).test(ta.value);
+      }, [reKx, reOther], { timeout: 180000 });
+    } catch (e) {
+      const ta = await page.evaluate(() => { const t = document.querySelector("textarea"); return t ? t.value : "(no textarea)"; });
+      return fail(label + " OCR text assertion failed. textarea value was:\n" + ta);
+    }
+  };
+  await assertResult("Paddle-crop", "KX[-—_ ]?1234AB", "98765");
+  const engine1 = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
+  if (!/PaddleOCR/.test(engine1)) return fail("Expected PaddleOCR engine for cropped 英数字 path, got: " + engine1);
   const recognized = await page.evaluate(() => document.querySelector("textarea").value);
-  log("Step 3: OCR text matched /KX-?1234AB/ and /98765/. Recognized:\n  " + recognized.replace(/\n/g, "\\n"));
+  log("Step 3: cropped-region OCR via " + engine1 + " matched. Recognized:\n  " + recognized.replace(/\n/g, "\\n"));
 
-  if (cspViolations.length) return fail("CSP violation(s) occurred during OCR.");
+  if (cspViolations.length) return fail("CSP violation(s) occurred during Paddle OCR.");
   const cspFromPage = await page.evaluate(() => window.__csp || []);
   if (cspFromPage.length) { cspViolations.push(...cspFromPage); return fail("securitypolicyviolation events fired."); }
+
+  // ---- full-image path -> Tesseract ----
+  await page.getByText("範囲を選び直す", { exact: true }).click();
+  await page.waitForSelector(".crop-stage", { timeout: 10000 });
+  await page.getByText("全体を読み取る", { exact: true }).click();
+  await assertResult("Tesseract-full", "KX[-—_ ]?1234AB", "98765");
+  const engine2 = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
+  if (!/Tesseract/.test(engine2)) return fail("Expected Tesseract engine for full-image path, got: " + engine2);
+  log("Step 3b: full-image OCR via " + engine2 + " matched.");
 
   // Save the record.
   await page.getByText("保存する", { exact: true }).click();
@@ -293,7 +355,10 @@ async function main() {
       }, "image/png");
     });
   }, { variant, cjkFamily });
-  log(`Step 8: jpn-mode ${variant === "cjk" ? "CJK label (型番 KX-1234)" : "ASCII label (MODEL KX-9876 / TYPE JP-TEST)"} image injected, OCR running (variant: ${variant})...`);
+  log(`Step 8: jpn-mode ${variant === "cjk" ? "CJK label (型番 KX-1234)" : "ASCII label (MODEL KX-9876 / TYPE JP-TEST)"} image injected; running cropped Tesseract path...`);
+
+  await expandCropToFull();
+  await page.getByText("この範囲を読み取る", { exact: true }).click();
 
   try {
     await page.waitForSelector("textarea", { timeout: 150000 });
@@ -311,7 +376,9 @@ async function main() {
     return fail("Japanese-mode OCR text assertion failed (variant: " + variant + "). textarea value was:\n" + ta);
   }
   const jpnRecognized = await page.evaluate(() => document.querySelector("textarea").value);
-  log(`Step 9: jpn-mode OCR succeeded (${variant} variant). Recognized:\n  ` + jpnRecognized.replace(/\n/g, "\\n"));
+  const engine3 = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
+  if (!/Tesseract/.test(engine3)) return fail("Expected Tesseract engine for jpn cropped path, got: " + engine3);
+  log(`Step 9: jpn-mode cropped OCR via ${engine3} succeeded (${variant} variant). Recognized:\n  ` + jpnRecognized.replace(/\n/g, "\\n"));
 
   if (cspViolations.length) return fail("CSP violation(s) occurred during Japanese-mode OCR.");
   const cspFromPage2 = await page.evaluate(() => window.__csp || []);

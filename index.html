@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-wpgeC5+RYtHIkaeFKONbEP7BnbDaZqLxwDXZFUozvck=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-ZDmKrqNDvLuI+npN05l38bWm2J2dwIokmZDv0nJ9F1I='; img-src 'self' blob: data:; connect-src https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-kkmcJl+kjJd6u1xYEogJNN67VsPw80RTu+wBpnNOHec=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-i5QX1zPQerxA+Dcf3V4lxyEcHNR/dxIwt8a5hwg1dRA='; img-src 'self' blob: data:; connect-src https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
 <title>ラベルOCR</title>
 <style>
 :root{
@@ -54,7 +54,24 @@ textarea{ width:100%; min-height:120px; resize:vertical; background:var(--panel2
 .progfill{ height:100%; background:var(--accent); transition:width .2s ease; }
 .progtxt{ font-size:13px; color:var(--muted); margin-top:6px; text-align:center; }
 .conf{ font-size:13px; color:var(--muted); margin:8px 2px; }
+.engine{ font-size:13px; color:var(--muted); margin:2px 2px 8px; }
+.engine b{ color:var(--fg); }
 h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700; }
+/* ---- crop stage ---- */
+.crop-stage{ position:relative; width:100%; margin:2px 0 4px; touch-action:none;
+  user-select:none; -webkit-user-select:none; background:var(--panel2);
+  border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+/* No max-height/object-fit: the overlay's %-coordinates must map 1:1 onto the
+   image box, so the stage must be exactly the image's own aspect ratio. */
+.crop-img{ display:block; width:100%; height:auto; pointer-events:none; }
+.crop-overlay{ position:absolute; border:2px solid var(--accent);
+  box-shadow:0 0 0 100vmax rgba(0,0,0,.5); box-sizing:border-box; cursor:move; touch-action:none; }
+.crop-handle{ position:absolute; width:30px; height:30px; background:var(--accent);
+  border:2px solid #fff; border-radius:50%; touch-action:none; }
+.crop-handle.nw{ left:-15px; top:-15px; cursor:nwse-resize; }
+.crop-handle.ne{ right:-15px; top:-15px; cursor:nesw-resize; }
+.crop-handle.sw{ left:-15px; bottom:-15px; cursor:nesw-resize; }
+.crop-handle.se{ right:-15px; bottom:-15px; cursor:nwse-resize; }
 .cal{ background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
   padding:12px; margin-bottom:14px; }
 .calhead{ display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
@@ -124,6 +141,25 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
   };
   const LANG_MODE_KEY = "label_ocr_lang_mode";
 
+  // ---- Pinned PaddleOCR (ONNX / onnxruntime-web) assets ----
+  // The cropped 英数字 path runs PP-OCRv4 recognition (rec-only, no detection):
+  // the user has already isolated the text region, so we skip DBNet, split the
+  // crop into lines by projection profile, and CTC-greedy-decode each line.
+  // onnxruntime-web runs single-threaded (GitHub Pages sends no COOP/COEP, so
+  // SharedArrayBuffer is unavailable); SIMD is used, the proxy worker is off.
+  const ORT_VER = "1.19.2";
+  const ORT = {
+    script: "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.wasm.min.js",
+    wasmDir: "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/"
+  };
+  const PADDLE = {
+    rec: "https://cdn.jsdelivr.net/npm/@gutenye/ocr-models@1.4.2/assets/ch_PP-OCRv4_rec_infer.onnx",
+    dict: "https://cdn.jsdelivr.net/npm/@gutenye/ocr-models@1.4.2/assets/ppocr_keys_v1.txt"
+  };
+  // PP-OCR rec normalization: (x/255 - 0.5) / 0.5, channel order B,G,R (cv2/BGR,
+  // matching PaddleOCR training). Height fixed to 48, width kept proportional.
+  const REC_H = 48;
+
   // ---------------- IndexedDB ----------------
   const DB_NAME = "label_ocr_db", STORE = "records", DB_VER = 1;
   function openDB() {
@@ -182,6 +218,11 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
     return p[0] + "年" + (+p[1]) + "月" + (+p[2]) + "日 (" + dow + ")";
   }
 
+  // ---------------- small math helpers ----------------
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+  function newCanvas(w, h) { const c = document.createElement("canvas"); c.width = w; c.height = h; return c; }
+  function cleanText(t) { return (t || "").replace(/\n{3,}/g, "\n\n").trim(); }
+
   // ---------------- Image loading (EXIF-aware) ----------------
   async function loadBitmap(blob) {
     if (typeof createImageBitmap === "function") {
@@ -208,14 +249,14 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
     const scale = Math.min(1, maxSide / Math.max(w, h));
     const cw = Math.max(1, Math.round(w * scale));
     const ch = Math.max(1, Math.round(h * scale));
-    const c = document.createElement("canvas");
-    c.width = cw; c.height = ch;
+    const c = newCanvas(cw, ch);
     const ctx = c.getContext("2d");
     ctx.drawImage(src, 0, 0, cw, ch);
     return c;
   }
 
-  // Preprocess for OCR: downscale, grayscale, percentile contrast stretch.
+  // Full-image preprocess for the Tesseract path: downscale, grayscale,
+  // percentile contrast stretch. (Cropped regions use preprocessCrop below.)
   function preprocess(src) {
     const c = drawScaled(src, 1600);
     const ctx = c.getContext("2d");
@@ -229,7 +270,6 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
       const y = (r * 0.299 + g * 0.587 + b * 0.114) | 0;
       gray[i] = y; hist[y]++;
     }
-    // 2nd / 98th percentile bounds for a robust contrast stretch.
     const lowCut = n * 0.02, highCut = n * 0.98;
     let acc = 0, lo = 0, hi = 255;
     for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= lowCut) { lo = v; break; } }
@@ -244,6 +284,138 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
       d[i * 4 + 3] = 255;
     }
     ctx.putImageData(img, 0, 0);
+    return c;
+  }
+
+  function otsuThreshold(hist, total) {
+    let sum = 0;
+    for (let i = 0; i < 256; i++) sum += i * hist[i];
+    let sumB = 0, wB = 0, max = 0, thr = 0;
+    for (let i = 0; i < 256; i++) {
+      wB += hist[i]; if (wB === 0) continue;
+      const wF = total - wB; if (wF === 0) break;
+      sumB += i * hist[i];
+      const mB = sumB / wB, mF = (sum - sumB) / wF;
+      const between = wB * wF * (mB - mF) * (mB - mF);
+      if (between > max) { max = between; thr = i; }
+    }
+    return thr;
+  }
+
+  // Locate horizontal text bands in an image via a projection profile.
+  // Returns [{y0,y1}] in the source's own pixel coordinates. Used both to
+  // split the crop into single lines (Paddle) and to pick Tesseract PSM.
+  function findTextBands(src) {
+    const { w, h } = dims(src);
+    const scale = Math.min(1, 1000 / Math.max(w, h));
+    const cw = Math.max(1, Math.round(w * scale)), ch = Math.max(1, Math.round(h * scale));
+    const c = newCanvas(cw, ch);
+    c.getContext("2d").drawImage(src, 0, 0, cw, ch);
+    const d = c.getContext("2d").getImageData(0, 0, cw, ch).data;
+    const n = cw * ch;
+    const gray = new Uint8Array(n);
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < n; i++) {
+      const y = (d[i * 4] * 0.299 + d[i * 4 + 1] * 0.587 + d[i * 4 + 2] * 0.114) | 0;
+      gray[i] = y; hist[y]++;
+    }
+    const t = otsuThreshold(hist, n);
+    let dark = 0;
+    for (let i = 0; i < n; i++) if (gray[i] < t) dark++;
+    const textIsDark = dark <= n - dark; // text is usually the minority class
+    const rowInk = new Uint32Array(ch);
+    for (let y = 0; y < ch; y++) {
+      let cnt = 0; const base = y * cw;
+      for (let x = 0; x < cw; x++) {
+        const isDark = gray[base + x] < t;
+        if (textIsDark ? isDark : !isDark) cnt++;
+      }
+      rowInk[y] = cnt;
+    }
+    let maxInk = 0;
+    for (let y = 0; y < ch; y++) if (rowInk[y] > maxInk) maxInk = rowInk[y];
+    if (maxInk === 0) return [{ y0: 0, y1: h }];
+    const thr = Math.max(1, maxInk * 0.12);
+    const gapAllow = Math.max(2, Math.round(ch * 0.02));
+    const raw = [];
+    let start = -1, gap = 0;
+    for (let y = 0; y < ch; y++) {
+      if (rowInk[y] > thr) { if (start < 0) start = y; gap = 0; }
+      else if (start >= 0) { gap++; if (gap > gapAllow) { raw.push([start, y - gap]); start = -1; gap = 0; } }
+    }
+    if (start >= 0) raw.push([start, ch - 1]);
+    const out = [];
+    const inv = 1 / scale;
+    const minH = Math.max(4, ch * 0.02);
+    for (const seg of raw) {
+      const a = seg[0], b = seg[1];
+      if (b - a < minH) continue;
+      const pad = Math.round((b - a) * 0.25) + 2;
+      const y0 = Math.max(0, a - pad), y1 = Math.min(ch - 1, b + pad);
+      out.push({ y0: Math.round(y0 * inv), y1: Math.round((y1 + 1) * inv) });
+    }
+    return out.length ? out : [{ y0: 0, y1: h }];
+  }
+
+  // Cropped-region preprocess for Tesseract: upscale small crops so text is
+  // legible, grayscale, percentile stretch, Otsu binarize with polarity
+  // detection (invert white-on-dark). Returns {canvas, singleLine}.
+  function preprocessCrop(src) {
+    const bands = findTextBands(src);
+    const { w, h } = dims(src);
+    const short = Math.min(w, h), long = Math.max(w, h);
+    let f = 1;
+    if (short < 300) f = Math.min(3, Math.max(2, Math.ceil(300 / short)));
+    if (long * f > 2000) f = Math.max(1, 2000 / long);
+    const cw = Math.max(1, Math.round(w * f)), ch = Math.max(1, Math.round(h * f));
+    const c = newCanvas(cw, ch);
+    const ctx = c.getContext("2d");
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(src, 0, 0, cw, ch);
+    const img = ctx.getImageData(0, 0, cw, ch);
+    const d = img.data; const n = cw * ch;
+    const gray = new Uint8ClampedArray(n);
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < n; i++) {
+      const y = (d[i * 4] * 0.299 + d[i * 4 + 1] * 0.587 + d[i * 4 + 2] * 0.114) | 0;
+      gray[i] = y; hist[y]++;
+    }
+    const lowCut = n * 0.02, highCut = n * 0.98;
+    let acc = 0, lo = 0, hi = 255;
+    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= lowCut) { lo = v; break; } }
+    acc = 0;
+    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= highCut) { hi = v; break; } }
+    if (hi <= lo) { lo = 0; hi = 255; }
+    const range = hi - lo;
+    const hist2 = new Uint32Array(256);
+    for (let i = 0; i < n; i++) {
+      let v = (gray[i] - lo) * 255 / range;
+      v = v < 0 ? 0 : v > 255 ? 255 : v; v = v | 0;
+      gray[i] = v; hist2[v]++;
+    }
+    const t = otsuThreshold(hist2, n);
+    let dark = 0;
+    for (let i = 0; i < n; i++) if (gray[i] < t) dark++;
+    const textIsDark = dark <= n - dark;
+    for (let i = 0; i < n; i++) {
+      const isDark = gray[i] < t;
+      const black = textIsDark ? isDark : !isDark;
+      const val = black ? 0 : 255;
+      d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = val; d[i * 4 + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+    return { canvas: c, singleLine: bands.length <= 1 };
+  }
+
+  // Extract the on-screen crop rectangle (fractions 0..1) as original-image pixels.
+  function cropFromBitmap(bmp, r) {
+    const { w, h } = dims(bmp);
+    let sx = Math.round(r.x * w), sy = Math.round(r.y * h);
+    let sw = Math.round(r.w * w), sh = Math.round(r.h * h);
+    sx = clamp(sx, 0, w - 1); sy = clamp(sy, 0, h - 1);
+    sw = clamp(sw, 1, w - sx); sh = clamp(sh, 1, h - sy);
+    const c = newCanvas(sw, sh);
+    c.getContext("2d").drawImage(bmp, sx, sy, sw, sh, 0, 0, sw, sh);
     return c;
   }
 
@@ -276,6 +448,11 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
     tessWorkerMode = mode;
     return tessWorker;
   }
+  async function releaseTessWorker() {
+    if (!tessWorker) return;
+    const old = tessWorker; tessWorker = null; tessWorkerMode = null;
+    try { await old.terminate(); } catch (e) { /* ignore */ }
+  }
   function mapStatus(s) {
     if (!s) return "処理中…";
     if (s.indexOf("core") >= 0) return "エンジンを読み込み中…";
@@ -284,6 +461,118 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
     if (s.indexOf("recognizing") >= 0) return "認識中…";
     if (s.indexOf("loading") >= 0) return "読み込み中…";
     return "処理中…";
+  }
+
+  // ---------------- PaddleOCR (onnxruntime-web, rec-only) ----------------
+  let ortScriptPromise = null;
+  function loadOrt() {
+    if (window.ort) return Promise.resolve(window.ort);
+    if (ortScriptPromise) return ortScriptPromise;
+    ortScriptPromise = new Promise((res, rej) => {
+      const s = document.createElement("script");
+      s.src = ORT.script; s.async = true;
+      s.onload = () => { window.ort ? res(window.ort) : rej(new Error("onnxruntime-web の初期化に失敗しました")); };
+      s.onerror = () => { ortScriptPromise = null; rej(new Error("onnxruntime-web の読み込みに失敗しました")); };
+      document.head.appendChild(s);
+    });
+    return ortScriptPromise;
+  }
+
+  let paddleSession = null;
+  let paddleDict = null;
+  let paddleLoading = null;
+  async function getPaddle(onStatus) {
+    if (paddleSession && paddleDict) return { session: paddleSession, dict: paddleDict };
+    if (paddleLoading) return paddleLoading;
+    paddleLoading = (async () => {
+      if (onStatus) onStatus("OCRエンジンを準備中…", 0.2);
+      const ort = await loadOrt();
+      ort.env.wasm.numThreads = 1;      // GitHub Pages: no COOP/COEP -> no SharedArrayBuffer
+      ort.env.wasm.proxy = false;       // no proxy worker (keeps CSP simple)
+      ort.env.wasm.simd = true;
+      ort.env.wasm.wasmPaths = ORT.wasmDir;
+      if (onStatus) onStatus("モデルを読み込み中…", 0.45);
+      const [session, dictText] = await Promise.all([
+        ort.InferenceSession.create(PADDLE.rec, { executionProviders: ["wasm"], graphOptimizationLevel: "all" }),
+        fetch(PADDLE.dict).then((r) => { if (!r.ok) throw new Error("辞書ファイルの取得に失敗しました"); return r.text(); })
+      ]);
+      paddleSession = session;
+      // PaddleOCR CTCLabelDecode: index 0 = blank, indices 1..N map to dict[i-1];
+      // dict = each line of ppocr_keys_v1.txt plus a trailing space char.
+      // A trailing newline in the file must not become an extra empty entry,
+      // or the space char (and nothing else) would decode to "".
+      const lines = dictText.split("\n");
+      while (lines.length && lines[lines.length - 1] === "") lines.pop();
+      paddleDict = [...lines, " "];
+      return { session: paddleSession, dict: paddleDict };
+    })();
+    try { return await paddleLoading; }
+    finally { paddleLoading = null; }
+  }
+  function releasePaddle() {
+    if (paddleSession) {
+      try { if (paddleSession.release) paddleSession.release(); } catch (e) { /* ignore */ }
+      paddleSession = null;
+    }
+  }
+
+  function lineCanvasFrom(src, band) {
+    const { w, h } = dims(src);
+    const y0 = clamp(band.y0 | 0, 0, h - 1);
+    const y1 = clamp(band.y1 | 0, y0 + 1, h);
+    const bh = Math.max(1, y1 - y0);
+    const c = newCanvas(w, bh);
+    c.getContext("2d").drawImage(src, 0, y0, w, bh, 0, 0, w, bh);
+    return c;
+  }
+
+  // Resize a single-line image to height 48 (proportional width), build the
+  // BGR CHW float tensor, run rec, CTC-greedy decode.
+  async function recOne(ort, session, dict, lineCanvas) {
+    let w = Math.round(lineCanvas.width * REC_H / lineCanvas.height);
+    w = clamp(w, 16, 2000);
+    const c = newCanvas(w, REC_H);
+    const ctx = c.getContext("2d");
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(lineCanvas, 0, 0, w, REC_H);
+    const d = ctx.getImageData(0, 0, w, REC_H).data;
+    const n = w * REC_H;
+    const input = new Float32Array(3 * n);
+    for (let i = 0; i < n; i++) {
+      const r = d[i * 4] / 255, g = d[i * 4 + 1] / 255, b = d[i * 4 + 2] / 255;
+      input[i] = (b - 0.5) / 0.5;         // B plane
+      input[n + i] = (g - 0.5) / 0.5;     // G plane
+      input[2 * n + i] = (r - 0.5) / 0.5; // R plane
+    }
+    const tensor = new ort.Tensor("float32", input, [1, 3, REC_H, w]);
+    const feeds = {}; feeds[session.inputNames[0]] = tensor;
+    const out = await session.run(feeds);
+    const o = out[session.outputNames[0]];
+    const T = o.dims[1], C = o.dims[2], data = o.data;
+    let prev = -1, s = "";
+    for (let t = 0; t < T; t++) {
+      const base = t * C;
+      let best = data[base], bi = 0;
+      for (let ci = 1; ci < C; ci++) { const v = data[base + ci]; if (v > best) { best = v; bi = ci; } }
+      if (bi !== 0 && bi !== prev) { const ch = dict[bi - 1]; if (ch !== undefined) s += ch; }
+      prev = bi;
+    }
+    return s.trim();
+  }
+
+  async function paddleRecognize(cropCanvas, onStatus) {
+    const { session, dict } = await getPaddle(onStatus);
+    const ort = window.ort;
+    if (onStatus) onStatus("認識中…", 0.85);
+    const bands = findTextBands(cropCanvas);
+    const texts = [];
+    for (let i = 0; i < bands.length; i++) {
+      const lc = lineCanvasFrom(cropCanvas, bands[i]);
+      const t = await recOne(ort, session, dict, lc);
+      if (t) texts.push(t);
+    }
+    if (onStatus) onStatus("完了", 1);
+    return texts.join("\n");
   }
 
   // ---------------- Clipboard helpers ----------------
@@ -323,13 +612,16 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
         ocrMode.value = mode;
         try { localStorage.setItem(LANG_MODE_KEY, mode); } catch (e) { /* ignore */ }
       }
-      const stage = ref("input");           // 'input' | 'processing' | 'result'
+      const stage = ref("input");           // 'input' | 'crop' | 'processing' | 'result'
       const captureErr = ref("");
       const previewUrl = ref("");           // data URL for preview (also stored)
       const ocrText = ref("");
       const ocrConf = ref(null);
+      const engineUsed = ref("");           // 'paddle' | 'tesseract'
       const progress = ref(0);
       const progStatus = ref("");
+      const cropRect = ref({ x: 0.1, y: 0.35, w: 0.8, h: 0.3 });
+      const stageEl = ref(null);
       let currentBitmap = null;             // non-reactive
 
       // ---- list state ----
@@ -349,33 +641,83 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
         } catch (e) { listErr.value = "記録の読み込みに失敗しました: " + e.message; }
       }
 
-      // ---- OCR pipeline ----
+      // ---- image input -> crop stage ----
       async function handleBlob(blob) {
         captureErr.value = "";
         if (!blob || (blob.type && blob.type.indexOf("image") !== 0)) {
           captureErr.value = "画像ファイルを選択してください。";
           return;
         }
-        stage.value = "processing";
-        progress.value = 0;
-        progStatus.value = "画像を準備中…";
-        ocrText.value = ""; ocrConf.value = null;
         try {
           currentBitmap = await loadBitmap(blob);
           previewUrl.value = toStorageDataUrl(currentBitmap);
-          const canvas = preprocess(currentBitmap);
+          cropRect.value = { x: 0.1, y: 0.35, w: 0.8, h: 0.3 };
+          ocrText.value = ""; ocrConf.value = null; engineUsed.value = "";
+          stage.value = "crop";
+        } catch (e) {
+          captureErr.value = "画像の読み込みに失敗しました: " + (e && e.message ? e.message : e);
+          stage.value = "input";
+        }
+      }
+
+      function setStatus(msg, p) {
+        progStatus.value = msg;
+        if (typeof p === "number") progress.value = p;
+      }
+
+      // ---- OCR pipeline ----
+      // Engine routing:
+      //   cropped 英数字 -> PaddleOCR PP-OCRv4 (rec-only), Tesseract fallback
+      //   everything else (full image, or 日本語) -> Tesseract
+      async function runOcr(useCrop) {
+        captureErr.value = "";
+        stage.value = "processing";
+        progress.value = 0.05; progStatus.value = "画像を準備中…";
+        ocrText.value = ""; ocrConf.value = null; engineUsed.value = "";
+        try {
+          const cropCanvas = useCrop ? cropFromBitmap(currentBitmap, cropRect.value) : null;
+          const usePaddle = (ocrMode.value === "eng" && useCrop);
+
+          if (usePaddle) {
+            try {
+              await releaseTessWorker();
+              const txt = await paddleRecognize(cropCanvas, setStatus);
+              engineUsed.value = "paddle";
+              ocrText.value = cleanText(txt);
+              ocrConf.value = null;
+              stage.value = "result";
+              return;
+            } catch (e) {
+              console.warn("PaddleOCR failed, falling back to Tesseract:", e);
+              // fall through to the Tesseract path on the same crop
+            }
+          }
+
+          // Tesseract path (full image, 日本語, or Paddle fallback)
+          releasePaddle();
+          const pre = useCrop ? preprocessCrop(cropCanvas)
+            : { canvas: preprocess(currentBitmap), singleLine: false };
+          progress.value = 0.1; progStatus.value = "OCRエンジンを準備中…";
           const worker = await getWorker(ocrMode.value, (m) => {
             progStatus.value = mapStatus(m.status);
             if (typeof m.progress === "number") progress.value = m.progress;
           });
+          const params = {
+            tessedit_pageseg_mode: useCrop ? (pre.singleLine ? "7" : "6") : "3"
+          };
+          params.tessedit_char_whitelist = ocrMode.value === "eng"
+            ? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-./:()#"
+            : "";
+          await worker.setParameters(params);
           progStatus.value = "認識中…";
-          const { data } = await worker.recognize(canvas);
-          ocrText.value = (data && data.text ? data.text : "").replace(/\n{3,}/g, "\n\n").trim();
+          const { data } = await worker.recognize(pre.canvas);
+          engineUsed.value = "tesseract";
+          ocrText.value = cleanText(data && data.text ? data.text : "");
           ocrConf.value = data && typeof data.confidence === "number" ? Math.round(data.confidence) : null;
           stage.value = "result";
         } catch (e) {
           captureErr.value = "文字認識に失敗しました: " + (e && e.message ? e.message : e);
-          stage.value = "input";
+          stage.value = currentBitmap ? "crop" : "input";
         }
       }
 
@@ -414,6 +756,42 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
         }
       }
 
+      // ---- crop overlay drag/resize (pointer events: touch + mouse) ----
+      let dragState = null;
+      function onCropDown(mode, ev) {
+        if (!stageEl.value) return;
+        ev.preventDefault(); ev.stopPropagation();
+        const rect = stageEl.value.getBoundingClientRect();
+        dragState = { mode, rect, startX: ev.clientX, startY: ev.clientY, orig: Object.assign({}, cropRect.value) };
+        window.addEventListener("pointermove", onCropMove);
+        window.addEventListener("pointerup", onCropUp);
+        window.addEventListener("pointercancel", onCropUp);
+      }
+      function onCropMove(ev) {
+        if (!dragState) return;
+        const { mode, rect, startX, startY, orig } = dragState;
+        const dx = rect.width ? (ev.clientX - startX) / rect.width : 0;
+        const dy = rect.height ? (ev.clientY - startY) / rect.height : 0;
+        const MIN = 0.05;
+        let x = orig.x, y = orig.y, w = orig.w, h = orig.h;
+        if (mode === "move") {
+          x = clamp(orig.x + dx, 0, 1 - orig.w);
+          y = clamp(orig.y + dy, 0, 1 - orig.h);
+        } else {
+          if (mode.indexOf("w") >= 0) { const nx = clamp(orig.x + dx, 0, orig.x + orig.w - MIN); w = orig.w + (orig.x - nx); x = nx; }
+          if (mode.indexOf("e") >= 0) { w = clamp(orig.w + dx, MIN, 1 - orig.x); }
+          if (mode.indexOf("n") >= 0) { const ny = clamp(orig.y + dy, 0, orig.y + orig.h - MIN); h = orig.h + (orig.y - ny); y = ny; }
+          if (mode.indexOf("s") >= 0) { h = clamp(orig.h + dy, MIN, 1 - orig.y); }
+        }
+        cropRect.value = { x, y, w, h };
+      }
+      function onCropUp() {
+        dragState = null;
+        window.removeEventListener("pointermove", onCropMove);
+        window.removeEventListener("pointerup", onCropUp);
+        window.removeEventListener("pointercancel", onCropUp);
+      }
+
       async function saveRecord() {
         try {
           const now = new Date();
@@ -436,8 +814,13 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
 
       function discard() {
         stage.value = "input";
-        previewUrl.value = ""; ocrText.value = ""; ocrConf.value = null;
+        previewUrl.value = ""; ocrText.value = ""; ocrConf.value = null; engineUsed.value = "";
         progress.value = 0; progStatus.value = ""; currentBitmap = null;
+      }
+      function backToCrop() {
+        if (!currentBitmap) { stage.value = "input"; return; }
+        captureErr.value = "";
+        stage.value = "crop";
       }
 
       async function deleteRecord(rec) {
@@ -491,38 +874,75 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
         ]);
       }
 
-      function renderCapture() {
-        if (stage.value === "processing") {
-          return h("div", { class: "card" }, [
-            h("div", { class: "progwrap" }, [
-              h("div", { class: "progbar" }, [
-                h("div", { class: "progfill", style: { width: Math.round(progress.value * 100) + "%" } })
-              ]),
-              h("div", { class: "progtxt" }, progStatus.value + " " + Math.round(progress.value * 100) + "%")
+      function renderProcessing() {
+        return h("div", { class: "card" }, [
+          h("div", { class: "progwrap" }, [
+            h("div", { class: "progbar" }, [
+              h("div", { class: "progfill", style: { width: Math.round(progress.value * 100) + "%" } })
             ]),
-            previewUrl.value ? h("img", { class: "preview", src: previewUrl.value, alt: "" }) : null
-          ]);
-        }
-        if (stage.value === "result") {
-          return h("div", {}, [
-            captureErr.value ? h("div", { class: "err" }, captureErr.value) : null,
-            h("div", { class: "card" }, [
-              h("h2", { class: "sec" }, "認識結果 — 保存しますか？"),
-              h("img", { class: "preview", src: previewUrl.value, alt: "撮影した画像" }),
-              ocrConf.value != null ? h("div", { class: "conf" }, "信頼度: " + ocrConf.value + "%") : null,
-              h("textarea", {
-                value: ocrText.value,
-                onInput: (e) => { ocrText.value = e.target.value; },
-                spellcheck: "false"
-              }),
-              h("div", { class: "btn-row", style: { marginTop: "12px" } }, [
-                h("button", { class: "btn ok", onClick: saveRecord }, "保存する"),
-                h("button", { class: "btn sec", onClick: discard }, "破棄")
+            h("div", { class: "progtxt" }, progStatus.value + " " + Math.round(progress.value * 100) + "%")
+          ]),
+          previewUrl.value ? h("img", { class: "preview", src: previewUrl.value, alt: "" }) : null
+        ]);
+      }
+
+      function renderCrop() {
+        const r = cropRect.value;
+        const box = {
+          left: (r.x * 100) + "%", top: (r.y * 100) + "%",
+          width: (r.w * 100) + "%", height: (r.h * 100) + "%"
+        };
+        return h("div", {}, [
+          captureErr.value ? h("div", { class: "err" }, captureErr.value) : null,
+          h("div", { class: "card" }, [
+            h("h2", { class: "sec" }, "読み取る範囲を選択"),
+            h("div", { class: "crop-stage", ref: stageEl }, [
+              h("img", { class: "crop-img", src: previewUrl.value, alt: "撮影した画像" }),
+              h("div", { class: "crop-overlay", style: box, onPointerdown: (e) => onCropDown("move", e) }, [
+                h("div", { class: "crop-handle nw", onPointerdown: (e) => onCropDown("nw", e) }),
+                h("div", { class: "crop-handle ne", onPointerdown: (e) => onCropDown("ne", e) }),
+                h("div", { class: "crop-handle sw", onPointerdown: (e) => onCropDown("sw", e) }),
+                h("div", { class: "crop-handle se", onPointerdown: (e) => onCropDown("se", e) })
               ])
+            ]),
+            h("div", { class: "hint" }, "読み取りたい文字の周りを枠で囲みます。四隅をドラッグして調整できます。"),
+            h("div", { class: "btn-row", style: { marginTop: "12px" } }, [
+              h("button", { class: "btn", onClick: () => runOcr(true) }, "この範囲を読み取る")
+            ]),
+            h("div", { class: "btn-row", style: { marginTop: "10px" } }, [
+              h("button", { class: "btn sec", onClick: () => runOcr(false) }, "全体を読み取る"),
+              h("button", { class: "btn sec", onClick: discard }, "やり直す")
             ])
-          ]);
-        }
-        // input stage
+          ])
+        ]);
+      }
+
+      function renderResult() {
+        const engineName = engineUsed.value === "paddle" ? "PaddleOCR (PP-OCRv4)" : "Tesseract";
+        return h("div", {}, [
+          captureErr.value ? h("div", { class: "err" }, captureErr.value) : null,
+          h("div", { class: "card" }, [
+            h("h2", { class: "sec" }, "認識結果 — 保存しますか？"),
+            h("img", { class: "preview", src: previewUrl.value, alt: "撮影した画像" }),
+            h("div", { class: "engine" }, ["エンジン: ", h("b", {}, engineName)]),
+            ocrConf.value != null ? h("div", { class: "conf" }, "信頼度: " + ocrConf.value + "%") : null,
+            h("textarea", {
+              value: ocrText.value,
+              onInput: (e) => { ocrText.value = e.target.value; },
+              spellcheck: "false"
+            }),
+            h("div", { class: "btn-row", style: { marginTop: "12px" } }, [
+              h("button", { class: "btn ok", onClick: saveRecord }, "保存する"),
+              h("button", { class: "btn sec", onClick: discard }, "破棄")
+            ]),
+            h("div", { class: "btn-row", style: { marginTop: "10px" } }, [
+              h("button", { class: "btn sec", onClick: backToCrop }, "範囲を選び直す")
+            ])
+          ])
+        ]);
+      }
+
+      function renderInput() {
         return h("div", {}, [
           captureErr.value ? h("div", { class: "err" }, captureErr.value) : null,
           h("div", { class: "card" }, [
@@ -537,9 +957,9 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
                 onClick: () => setOcrMode("jpn")
               }, "日本語+英数字")
             ]),
-            ocrMode.value === "jpn"
-              ? h("div", { class: "hint" }, "日本語モードは初回のみ言語データ（約2.0MB）をダウンロードするため、少し時間がかかります。")
-              : null
+            ocrMode.value === "eng"
+              ? h("div", { class: "hint" }, "英数字モードは、範囲を選んで読み取ると高精度エンジン PaddleOCR (PP-OCRv4) を使用します。初回の範囲読み取り時のみ、モデルとエンジン（合計 約22MB）をダウンロードします。「全体を読み取る」は Tesseract で処理します。")
+              : h("div", { class: "hint" }, "日本語モードは Tesseract を使用し、初回のみ言語データ（約2.0MB）をダウンロードするため、少し時間がかかります。")
           ]),
           h("div", { class: "card" }, [
             h("h2", { class: "sec" }, "ラベルを撮影・選択"),
@@ -548,9 +968,16 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
             fileButton("画像を選択", false),
             h("div", { style: { height: "10px" } }),
             h("button", { class: "btn sec", onClick: pasteFromClipboard }, "クリップボードから貼り付け"),
-            h("div", { class: "hint" }, "型番・製造番号のシールを大きく、明るく撮影すると精度が上がります。画像をコピーして Ctrl/Cmd+V でも貼り付けできます。")
+            h("div", { class: "hint" }, "型番・製造番号のシールを大きく、明るく撮影すると精度が上がります。撮影後に読み取る範囲を選べます。画像をコピーして Ctrl/Cmd+V でも貼り付けできます。")
           ])
         ]);
+      }
+
+      function renderCapture() {
+        if (stage.value === "processing") return renderProcessing();
+        if (stage.value === "crop") return renderCrop();
+        if (stage.value === "result") return renderResult();
+        return renderInput();
       }
 
       function renderRecord(rec) {
