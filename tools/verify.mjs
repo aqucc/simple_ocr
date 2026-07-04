@@ -56,6 +56,22 @@ const CACHE_FILES = {
 
 function log(...a) { console.log(...a); }
 
+// Noise-robustness test helper: count characters in `recognized` that are
+// NOT explained by the expected label strings. Case-insensitive; only
+// alphanumeric and CJK characters count as "garbage" (leftover whitespace/
+// punctuation after removing expected characters is not a hallucination).
+function countGarbage(recognized, expectedStrings) {
+  const allowed = new Set();
+  for (const s of expectedStrings) for (const ch of s.toUpperCase()) allowed.add(ch);
+  let n = 0;
+  for (const ch of recognized.toUpperCase()) {
+    if (allowed.has(ch)) continue;
+    if (/[A-Z0-9぀-ヿ一-鿿]/.test(ch)) n++;
+  }
+  return n;
+}
+const NOISE_LABEL_STRINGS = ["MODEL: KX-1234AB", "S/N 5X-98765"];
+
 // Does this container have a CJK-capable font installed? If not, canvas-rendered
 // Japanese glyphs would come out as tofu boxes and OCR-ing them proves nothing.
 // In that case we fall back to an ASCII-only image in jpn mode, which still
@@ -256,6 +272,82 @@ async function main() {
       return fail(label + " OCR text assertion failed. textarea value was:\n" + ta);
     }
   };
+  // Generate a noisy label image in-page: diagonal gray-gradient background,
+  // ~800 random low-contrast speckle dots/short strokes, a slight vignette,
+  // then the same dark label text as the clean test above. Used later by the
+  // noise-robustness test (both the Paddle and Tesseract paths).
+  async function generateNoisyLabelDataUrl() {
+    return await page.evaluate(() => {
+      // Seeded PRNG (mulberry32) so the noise pattern -- and therefore the
+      // test's garbage-character count -- is reproducible across runs
+      // instead of flaking on whichever random speckles happen to land.
+      function mulberry32(seed) {
+        return function () {
+          seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+          let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+      const rand = mulberry32(0xC0FFEE);
+      const c = document.createElement("canvas");
+      c.width = 700; c.height = 260;
+      const ctx = c.getContext("2d");
+      const grad = ctx.createLinearGradient(0, 0, c.width, c.height);
+      grad.addColorStop(0, "#d8d8d8");
+      grad.addColorStop(1, "#a8a8a8");
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, c.width, c.height);
+      for (let i = 0; i < 800; i++) {
+        const x = rand() * c.width, y = rand() * c.height;
+        const shade = (120 + rand() * 80) | 0;
+        ctx.fillStyle = `rgba(${shade},${shade},${shade},${(0.25 + rand() * 0.35).toFixed(2)})`;
+        if (rand() < 0.5) {
+          ctx.fillRect(x, y, 1 + rand() * 2, 1 + rand() * 2);
+        } else {
+          const len = 3 + rand() * 6;
+          const ang = rand() * Math.PI * 2;
+          ctx.lineWidth = 1;
+          ctx.strokeStyle = ctx.fillStyle;
+          ctx.beginPath();
+          ctx.moveTo(x, y);
+          ctx.lineTo(x + Math.cos(ang) * len, y + Math.sin(ang) * len);
+          ctx.stroke();
+        }
+      }
+      const vg = ctx.createRadialGradient(
+        c.width / 2, c.height / 2, Math.min(c.width, c.height) / 3,
+        c.width / 2, c.height / 2, Math.max(c.width, c.height) / 1.2
+      );
+      vg.addColorStop(0, "rgba(0,0,0,0)");
+      vg.addColorStop(1, "rgba(0,0,0,0.25)");
+      ctx.fillStyle = vg;
+      ctx.fillRect(0, 0, c.width, c.height);
+      ctx.fillStyle = "#111";
+      ctx.font = "28px monospace";
+      ctx.textBaseline = "top";
+      ctx.fillText("MODEL: KX-1234AB", 30, 70);
+      ctx.fillText("S/N 5X-98765", 30, 150);
+      return c.toDataURL("image/png");
+    });
+  }
+  // Feed a data: URL (built in-page, no network) into the file input.
+  async function injectDataUrlFile(dataUrl, filename) {
+    await page.evaluate(({ dataUrl, filename }) => {
+      const b64 = dataUrl.split(",")[1];
+      const bin = atob(b64);
+      const arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      const blob = new Blob([arr], { type: "image/png" });
+      const file = new File([blob], filename, { type: "image/png" });
+      const input = document.querySelector('input[type=file]:not([capture])');
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      input.files = dt.files;
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }, { dataUrl, filename });
+  }
+
   await assertResult("Paddle-crop", "KX[-—_ ]?1234AB", "98765");
   const engine1 = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
   if (!/PaddleOCR/.test(engine1)) return fail("Expected PaddleOCR engine for cropped 英数字 path, got: " + engine1);
@@ -383,6 +475,63 @@ async function main() {
   if (cspViolations.length) return fail("CSP violation(s) occurred during Japanese-mode OCR.");
   const cspFromPage2 = await page.evaluate(() => window.__csp || []);
   if (cspFromPage2.length) { cspViolations.push(...cspFromPage2); return fail("securitypolicyviolation events fired during Japanese-mode OCR."); }
+
+  // ---- Noise-robustness test (acceptance gate for the hallucination fixes) ----
+  // A background-noise-only crop should no longer surface hallucinated
+  // characters: Paddle via confidence rejection (score < 0.5) + ASCII-only
+  // post-filter, Tesseract via adaptive-threshold + despeckle preprocessing
+  // plus the word-confidence filter.
+  const noisyDataUrl = await generateNoisyLabelDataUrl();
+  log("Step 10: noisy label image generated (gradient bg + ~800 speckles + vignette).");
+
+  await page.getByText("破棄", { exact: true }).click();
+  await page.waitForSelector(".card", { timeout: 8000 });
+  await page.getByText("英数字(型番向け)", { exact: true }).click();
+  await page.waitForFunction(() => {
+    const b = [...document.querySelectorAll(".nav button")].find((el) => el.textContent.includes("英数字"));
+    return !!b && b.classList.contains("active");
+  }, { timeout: 5000 });
+
+  await injectDataUrlFile(noisyDataUrl, "noisy-label.png");
+  await expandCropToFull();
+  await page.getByText("この範囲を読み取る", { exact: true }).click();
+  await assertResult("Noise-Paddle-crop", "KX[-—_ ]?1234AB", "98765");
+  const noisyPaddleText = await page.evaluate(() => document.querySelector("textarea").value);
+  const engineNoisyPaddle = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
+  if (!/PaddleOCR/.test(engineNoisyPaddle)) return fail("Expected PaddleOCR engine for noisy cropped 英数字 path, got: " + engineNoisyPaddle);
+  const garbagePaddle = countGarbage(noisyPaddleText, NOISE_LABEL_STRINGS);
+  log("Step 11: noisy-image Paddle-crop recognized (garbage=" + garbagePaddle + "):\n  " + noisyPaddleText.replace(/\n/g, "\\n"));
+  if (garbagePaddle > 3) return fail("Noise test (Paddle) garbage count too high (" + garbagePaddle + " > 3). Recognized text:\n" + noisyPaddleText);
+
+  if (cspViolations.length) return fail("CSP violation(s) occurred during noisy Paddle OCR.");
+  const cspFromPage3 = await page.evaluate(() => window.__csp || []);
+  if (cspFromPage3.length) { cspViolations.push(...cspFromPage3); return fail("securitypolicyviolation events fired during noisy Paddle OCR."); }
+
+  // Same noisy image through the cropped Tesseract path (jpn mode exercises
+  // preprocessCrop's adaptive threshold + despeckle, same as the earlier
+  // jpn-mode test above).
+  await page.getByText("破棄", { exact: true }).click();
+  await page.waitForSelector(".card", { timeout: 8000 });
+  await page.getByText("日本語+英数字", { exact: true }).click();
+  await page.waitForFunction(() => {
+    const b = [...document.querySelectorAll(".nav button")].find((el) => el.textContent.includes("日本語"));
+    return !!b && b.classList.contains("active");
+  }, { timeout: 5000 });
+
+  await injectDataUrlFile(noisyDataUrl, "noisy-label-2.png");
+  await expandCropToFull();
+  await page.getByText("この範囲を読み取る", { exact: true }).click();
+  await assertResult("Noise-Tesseract-crop", "KX", "98765|1234");
+  const noisyTessText = await page.evaluate(() => document.querySelector("textarea").value);
+  const engineNoisyTess = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
+  if (!/Tesseract/.test(engineNoisyTess)) return fail("Expected Tesseract engine for noisy cropped jpn path, got: " + engineNoisyTess);
+  const garbageTess = countGarbage(noisyTessText, NOISE_LABEL_STRINGS);
+  log("Step 12: noisy-image Tesseract-crop (jpn mode) recognized (garbage=" + garbageTess + "):\n  " + noisyTessText.replace(/\n/g, "\\n"));
+  if (garbageTess > 6) return fail("Noise test (Tesseract) garbage count too high (" + garbageTess + " > 6). Recognized text:\n" + noisyTessText);
+
+  if (cspViolations.length) return fail("CSP violation(s) occurred during noisy Tesseract OCR.");
+  const cspFromPage4 = await page.evaluate(() => window.__csp || []);
+  if (cspFromPage4.length) { cspViolations.push(...cspFromPage4); return fail("securitypolicyviolation events fired during noisy Tesseract OCR."); }
 
   await page.getByText("破棄", { exact: true }).click();
 
