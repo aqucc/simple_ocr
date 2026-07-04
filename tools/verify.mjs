@@ -487,15 +487,14 @@ async function main() {
   // certification-mark logos), a boxed kanji "検" (IPAGothic, only drawn if
   // a CJK font is available), a stray triangle shape, plus the usual
   // model/serial lines and two real-English-word lines ("MADE" / "JAPAN").
-  // MADE and JAPAN are deliberately on their own lines rather than one
-  // "MADE IN JAPAN" line: this PP-OCRv4 rec model, on this synthetic
-  // monospace rendering, does not reliably predict a space character
-  // *between* words on the same line (verified empirically -- "MODEL:
-  // KX-1234AB" and "S/N 5X-98765" already come back space-free as
-  // "MODELKX-1234AB" / "S/N5X-98765", which happens to still classify fine
-  // as one model-like blob) so relying on inter-word spacing within a line
-  // for a spaceless-when-merged, no-digit English word would be flaky. Each
-  // word gets its own findTextBands line instead, sidestepping that.
+  // MADE and JAPAN are kept on separate lines here (this test predates
+  // word-level segmentation and is left as-is since it's still a valid,
+  // independent check of the dictionary/pattern token classifier); the
+  // "MADE IN JAPAN" *same-line* recovery via per-word segmentation is
+  // covered by the dedicated word-segmentation acceptance test above, which
+  // confirms this rec model's CTC output -- which does not reliably predict
+  // an inter-word space when a whole line is decoded in one shot -- is no
+  // longer a blocker now that each word is cropped and recognized on its own.
   // Note: PaddleOCR's rec-only pipeline already strips all non-ASCII output
   // (see paddleRecognize's ascii-strip), so the boxed kanji can never reach
   // this path's text regardless of the new word filter -- it's included for
@@ -572,6 +571,150 @@ async function main() {
   if (cspViolations.length) return fail("CSP violation(s) occurred during decoy-image OCR.");
   const cspFromPage5 = await page.evaluate(() => window.__csp || []);
   if (cspFromPage5.length) { cspViolations.push(...cspFromPage5); return fail("securitypolicyviolation events fired during decoy-image OCR."); }
+
+  await page.getByText("破棄", { exact: true }).click();
+  await page.waitForSelector(".card", { timeout: 8000 });
+
+  // ---- Acceptance test: word-level segmentation on the Paddle path ----
+  // One line "MADE IN JAPAN" (monospace, generous word spacing) plus the
+  // usual MODEL/S-N lines, through the cropped 英数字 (Paddle) path. Each
+  // line band is now further split into per-word boxes by column-gap
+  // segmentation (segmentWordsInLine) and each word is recognized
+  // independently, then rejoined with single spaces -- so MADE / IN / JAPAN
+  // should come back as separate tokens on the SAME output line, instead of
+  // requiring separate photographed lines (this rec model rarely emits an
+  // inter-word space when a whole line is decoded in one shot).
+  async function generateWordSegLabelDataUrl() {
+    return await page.evaluate(() => {
+      const c = document.createElement("canvas");
+      c.width = 760; c.height = 260;
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
+      ctx.fillStyle = "#000"; ctx.textBaseline = "top"; ctx.font = "28px monospace";
+      ctx.fillText("MODEL: KX-1234AB", 30, 30);
+      ctx.fillText("S/N 5X-98765", 30, 90);
+      // Generous inter-word spacing (well past the word-gap split
+      // threshold) -- letters within a word keep normal monospace kerning
+      // (well under it), so this should split into 3 word boxes.
+      ctx.fillText("MADE     IN     JAPAN", 30, 170);
+      return c.toDataURL("image/png");
+    });
+  }
+
+  const wordSegDataUrl = await generateWordSegLabelDataUrl();
+  log("Step 12: word-segmentation label image generated (MODEL/S-N lines + one 'MADE     IN     JAPAN' line).");
+
+  await page.getByText("英数字(型番向け)", { exact: true }).click();
+  await page.waitForFunction(() => {
+    const b = [...document.querySelectorAll(".nav button")].find((el) => el.textContent.includes("英数字"));
+    return !!b && b.classList.contains("active");
+  }, { timeout: 5000 });
+
+  await injectDataUrlFile(wordSegDataUrl, "wordseg-label.png");
+  await expandCropToFull();
+  await page.getByText("この範囲を読み取る", { exact: true }).click();
+  await assertResult("WordSeg-Paddle-crop", "KX[-—_ ]?1234AB", "98765");
+  const engineWordSeg = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
+  if (!/PaddleOCR/.test(engineWordSeg)) return fail("Expected PaddleOCR engine for word-segmentation cropped 英数字 path, got: " + engineWordSeg);
+  const wordSegText = await page.evaluate(() => document.querySelector("textarea").value);
+  log("Step 12b: word-segmentation Paddle-crop recognized:\n  " + wordSegText.replace(/\n/g, "\\n"));
+  const madeJapanSameLine = wordSegText.split("\n").some((line) => /MADE/i.test(line) && /JAPAN/i.test(line));
+  if (!madeJapanSameLine) return fail("Word-segmentation test: MADE and JAPAN not found on the same output line. Text was:\n" + wordSegText);
+  const fullPhraseLine = wordSegText.split("\n").some((line) => /MADE\s+IN\s+JAPAN/i.test(line));
+  log(fullPhraseLine
+    ? "Step 12c: full phrase 'MADE IN JAPAN' recovered on one line (IN survived)."
+    : "Step 12c: MADE + JAPAN recovered on one line, but IN did not survive as its own recognized word (rec misread) -- acceptable per spec relaxation.");
+
+  if (cspViolations.length) return fail("CSP violation(s) occurred during word-segmentation OCR.");
+  const cspFromPage6 = await page.evaluate(() => window.__csp || []);
+  if (cspFromPage6.length) { cspViolations.push(...cspFromPage6); return fail("securitypolicyviolation events fired during word-segmentation OCR."); }
+
+  await page.getByText("破棄", { exact: true }).click();
+  await page.waitForSelector(".card", { timeout: 8000 });
+
+  // ---- Acceptance test: barcode-neighbor digits are no longer dropped ----
+  // A barcode-like block (40 vertical black stripes, random widths, ~60px
+  // tall, spanning ~70% width) directly above the digit line
+  // "4 901234 567894" (EAN-style: lone leading digit + two 6-digit groups),
+  // and nothing else. Before the barcode-robust banding fix + per-word
+  // rejection, the stripe block's own row-ink either starved the relative
+  // threshold so the sparser digit row never became its own band, or the
+  // two bands merged and the combined whole-line decode failed the
+  // score<0.5 gate, dropping the real digits along with the barcode. Now:
+  // barcode-robust banding keeps them as separate bands, word segmentation
+  // isolates "4" / "901234" / "567894" as separate boxes, and the per-word
+  // score gate rejects the barcode segment(s) alone without taking the
+  // digits with it. The lone leading "4" survives the 単語フィルタ only via
+  // the new EAN single-digit exception (line has >= 6 digits total).
+  async function generateBarcodeDigitsDataUrl() {
+    return await page.evaluate(() => {
+      function mulberry32(seed) {
+        return function () {
+          seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+          let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+      const rand = mulberry32(0xBA5C0DE);
+      const c = document.createElement("canvas");
+      c.width = 760; c.height = 200;
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
+      ctx.fillStyle = "#000";
+
+      // 40 vertical stripes, random widths, spanning ~70% of the width,
+      // ~60px tall, starting near the top.
+      const barcodeX0 = c.width * 0.15, barcodeW = c.width * 0.7, barcodeY0 = 15, barcodeH = 60;
+      const stripeCount = 40;
+      const widths = [];
+      let totalW = 0;
+      for (let i = 0; i < stripeCount; i++) { const sw = 2 + rand() * 6; widths.push(sw); totalW += sw; }
+      const scaleW = barcodeW / totalW;
+      let x = barcodeX0;
+      for (let i = 0; i < stripeCount; i++) {
+        const sw = widths[i] * scaleW;
+        if (i % 2 === 0) ctx.fillRect(x, barcodeY0, sw, barcodeH);
+        x += sw;
+      }
+
+      // Digit line directly under the barcode: lone leading digit + two
+      // 6-digit groups, generously spaced so each is its own word segment.
+      ctx.font = "32px monospace"; ctx.textBaseline = "top";
+      ctx.fillText("4     901234     567894", barcodeX0, barcodeY0 + barcodeH + 12);
+      return c.toDataURL("image/png");
+    });
+  }
+
+  const BARCODE_LABEL_STRINGS = ["4", "901234", "567894"];
+  const barcodeDataUrl = await generateBarcodeDigitsDataUrl();
+  log("Step 13: barcode-neighbor label image generated (40-stripe barcode block + '4 901234 567894' digit line, nothing else).");
+
+  await page.getByText("英数字(型番向け)", { exact: true }).click();
+  await page.waitForFunction(() => {
+    const b = [...document.querySelectorAll(".nav button")].find((el) => el.textContent.includes("英数字"));
+    return !!b && b.classList.contains("active");
+  }, { timeout: 5000 });
+
+  await injectDataUrlFile(barcodeDataUrl, "barcode-digits.png");
+  await expandCropToFull();
+  await page.getByText("この範囲を読み取る", { exact: true }).click();
+  await assertResult("Barcode-Paddle-crop", "901234", "567894");
+  const engineBarcode = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
+  if (!/PaddleOCR/.test(engineBarcode)) return fail("Expected PaddleOCR engine for barcode-neighbor cropped 英数字 path, got: " + engineBarcode);
+  const barcodeText = await page.evaluate(() => document.querySelector("textarea").value);
+  const barcodeTokens = barcodeText.split(/\s+/).filter(Boolean);
+  if (!barcodeTokens.includes("4")) {
+    return fail("Barcode test: standalone digit '4' token not found (EAN single-digit word-filter exception). Tokens: " +
+      JSON.stringify(barcodeTokens) + "\nText:\n" + barcodeText);
+  }
+  const garbageBarcode = countGarbage(barcodeText, BARCODE_LABEL_STRINGS);
+  log("Step 13b: barcode-neighbor Paddle-crop recognized (garbage=" + garbageBarcode + "):\n  " + barcodeText.replace(/\n/g, "\\n"));
+  if (garbageBarcode > 2) return fail("Barcode test garbage count too high (" + garbageBarcode + " > 2); barcode stripes likely surfaced tokens. Text:\n" + barcodeText);
+
+  if (cspViolations.length) return fail("CSP violation(s) occurred during barcode-neighbor OCR.");
+  const cspFromPage7 = await page.evaluate(() => window.__csp || []);
+  if (cspFromPage7.length) { cspViolations.push(...cspFromPage7); return fail("securitypolicyviolation events fired during barcode-neighbor OCR."); }
 
   await page.getByText("破棄", { exact: true }).click();
   await page.waitForSelector(".card", { timeout: 8000 });

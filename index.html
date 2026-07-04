@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-qit1mICHBOdBalU1g0CQYmFQZgssY2X+hJLOy6MaxDc=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-QlSLAaWFOz6TxskYlicws6p2yla/iKapo8FHj5R8FZ8='; img-src 'self' blob: data:; connect-src https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-ylqbTvLSIUXuWYEQFsUI8f62vqiK0rn4JVACF9B6qJA=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-QlSLAaWFOz6TxskYlicws6p2yla/iKapo8FHj5R8FZ8='; img-src 'self' blob: data:; connect-src https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
 <title>ラベルOCR</title>
 <style>
 :root{
@@ -365,9 +365,16 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
   ]);
   const TRAILING_PUNCT_RE = /[.,;:!?)"'\]]+$/;
 
-  function isKeepAsciiToken(tok, dictSet) {
+  function isKeepAsciiToken(tok, dictSet, lineDigitCount) {
     if (!tok) return false;
     const stripped = tok.replace(TRAILING_PUNCT_RE, "");
+    // EAN/UPC leading-digit exception: a barcode's human-readable digits are
+    // conventionally printed as a lone leading digit plus two 6-digit groups
+    // (e.g. "4 901234 567894"), so a single stray digit is otherwise
+    // indistinguishable from cert-mark noise UNLESS its line clearly is a
+    // barcode digit string (>= 6 digits total across the line). Deliberately
+    // narrow: this does not otherwise relax the general length>=2 rule.
+    if (/^\d$/.test(stripped) && lineDigitCount >= 6) return true;
     if (stripped.length >= 2 && dictSet && dictSet.has(stripped.toLowerCase())) return true;
     if (MODEL_LIKE_RE.test(tok) && /\d/.test(tok) && tok.length >= 2) return true;
     if (UNIT_RE.test(tok)) return true;
@@ -379,6 +386,7 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
   // whitespace between CJK characters, then keep/drop each CJK run or ASCII
   // token per the rules above. Returns "" if nothing in the line survives.
   function filterLine(line, dictSet) {
+    const lineDigitCount = (line.match(/\d/g) || []).length;
     let s = line.replace(SYMBOL_NOISE_RE, "");
     s = s.replace(CJK_SPACE_RE, "$1");
     const segments = s.match(CJK_SEGMENT_RE) || [];
@@ -389,7 +397,7 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
         if (seg.length >= 2 || cjkRunIsLexical(seg)) kept.push(seg);
       } else {
         const toks = seg.split(/\s+/).filter(Boolean);
-        for (const t of toks) if (isKeepAsciiToken(t, dictSet)) kept.push(t);
+        for (const t of toks) if (isKeepAsciiToken(t, dictSet, lineDigitCount)) kept.push(t);
       }
     }
     return kept.join(" ");
@@ -582,12 +590,47 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
     let maxInk = 0;
     for (let y = 0; y < ch; y++) if (rowInk[y] > maxInk) maxInk = rowInk[y];
     if (maxInk === 0) return [{ y0: 0, y1: h }];
-    // A row only counts as textual if it clears BOTH a relative bar (12% of
-    // the strongest row in this image) AND an absolute one (3% of the row
-    // width) -- the absolute floor is what keeps noise-only crops (where
-    // "the strongest row" is itself just speckle) from producing bands.
-    const thr = Math.max(1, maxInk * 0.12, cw * 0.03);
     const gapAllow = Math.max(2, Math.round(ch * 0.02));
+    const absFloor = Math.max(1, cw * 0.03);
+    // Barcode robustness: an ultra-dense stripe block (e.g. a barcode) can
+    // have rows far inkier than any real text line. If that single row were
+    // allowed to set the relative bar below (12% of the strongest row), a
+    // much sparser but still-legitimate text row right next to it -- e.g.
+    // the human-readable digits printed under a barcode -- would fall below
+    // the bar and never become its own band, silently dropping real text.
+    // Fix: instead of the single strongest row in the whole image, use the
+    // WEAKEST peak among the distinct row-ink "blocks" found via a loose
+    // absolute floor -- i.e. let the sparsest plausible content block (not
+    // the densest one) set the bar, so one dense block can't starve a
+    // fainter block elsewhere. Blocks that never clear today's absolute
+    // floor on their own (pure speckle) are excluded so they can't drag the
+    // bar down to noise level. Falls back to maxInk (today's behavior) when
+    // there's only one qualifying block (e.g. no barcode present).
+    const looseFloor = Math.max(1, cw * 0.01);
+    const blockPeaks = [];
+    {
+      let bStart = -1, bPeak = 0, bGap = 0;
+      for (let y = 0; y < ch; y++) {
+        if (rowInk[y] > looseFloor) {
+          if (bStart < 0) { bStart = y; bPeak = 0; }
+          if (rowInk[y] > bPeak) bPeak = rowInk[y];
+          bGap = 0;
+        } else if (bStart >= 0) {
+          bGap++;
+          if (bGap > gapAllow) {
+            if (bPeak >= absFloor) blockPeaks.push(bPeak);
+            bStart = -1; bPeak = 0; bGap = 0;
+          }
+        }
+      }
+      if (bStart >= 0 && bPeak >= absFloor) blockPeaks.push(bPeak);
+    }
+    const refInk = blockPeaks.length ? Math.min(...blockPeaks) : maxInk;
+    // A row only counts as textual if it clears BOTH a relative bar (12% of
+    // refInk) AND an absolute one (3% of the row width) -- the absolute
+    // floor is what keeps noise-only crops (where refInk is itself just
+    // speckle) from producing bands.
+    const thr = Math.max(1, refInk * 0.12, absFloor);
     const raw = [];
     let start = -1, gap = 0;
     for (let y = 0; y < ch; y++) {
@@ -795,6 +838,111 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
     return c;
   }
 
+  // Word-level segmentation within one already-line-banded canvas: build a
+  // column ink profile (grayscale + Otsu, same polarity logic as
+  // findTextBands) and split on runs of empty columns wide enough to be
+  // inter-word whitespace rather than intra-word letter spacing -- "as if a
+  // human had drawn a box around each word". This is what lets
+  // paddleRecognize (a) reject just a failing word (e.g. a barcode-stripe
+  // segment next to real digits) instead of the whole line, and (b) recover
+  // multi-word lines the CTC decoder doesn't reliably print a space within
+  // (e.g. "MADE IN JAPAN" -> "MADEINJAPAN" on this rec model).
+  //
+  // Returns null when segmentation should be skipped and the caller should
+  // run the whole line through recOne unchanged (today's behavior): either
+  // only one ink block was found (nothing to split), or more than
+  // WORD_MAX_SEGMENTS blocks were found (almost certainly a barcode or
+  // texture, not real words -- let the whole-line score gate judge it
+  // instead of paying for dozens of recOne calls).
+  // Otherwise returns [{x0,x1,y0,y1}, ...] word boxes in the input canvas's
+  // own pixel coordinates, y-tightened to each word's own ink rows (plus
+  // ~15% padding all around, clamped to the canvas).
+  const WORD_GAP_HEIGHT_RATIO = 0.45;
+  const WORD_MAX_SEGMENTS = 24;
+  function segmentWordsInLine(lineCanvas) {
+    const { w: lw, h: lh } = dims(lineCanvas);
+    const scale = Math.min(1, 1400 / lw);
+    const aw = Math.max(1, Math.round(lw * scale)), ah = Math.max(1, Math.round(lh * scale));
+    const ac = newCanvas(aw, ah);
+    ac.getContext("2d").drawImage(lineCanvas, 0, 0, aw, ah);
+    const d = ac.getContext("2d").getImageData(0, 0, aw, ah).data;
+    const n = aw * ah;
+    const gray = new Uint8Array(n);
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < n; i++) {
+      const y = (d[i * 4] * 0.299 + d[i * 4 + 1] * 0.587 + d[i * 4 + 2] * 0.114) | 0;
+      gray[i] = y; hist[y]++;
+    }
+    const t = otsuThreshold(hist, n);
+    let dark = 0;
+    for (let i = 0; i < n; i++) if (gray[i] < t) dark++;
+    const textIsDark = dark <= n - dark;
+    const colInk = new Uint32Array(aw);
+    for (let x = 0; x < aw; x++) {
+      let cnt = 0;
+      for (let y = 0; y < ah; y++) {
+        const isDark = gray[y * aw + x] < t;
+        if (textIsDark ? isDark : !isDark) cnt++;
+      }
+      colInk[x] = cnt;
+    }
+    let maxCol = 0;
+    for (let x = 0; x < aw; x++) if (colInk[x] > maxCol) maxCol = colInk[x];
+    if (maxCol === 0) return null;
+
+    const emptyFloor = Math.max(0, Math.round(maxCol * 0.05));
+    const gapThreshold = Math.max(3, Math.round(ah * WORD_GAP_HEIGHT_RATIO));
+
+    // Column run-length split: a run of empty columns >= gapThreshold starts
+    // a new word segment; shorter gaps (letter spacing within a word) don't.
+    const rawSegs = [];
+    let segStart = -1, gapStart = -1, gapLen = 0;
+    for (let x = 0; x < aw; x++) {
+      const empty = colInk[x] <= emptyFloor;
+      if (!empty) {
+        if (segStart < 0) segStart = x;
+        gapStart = -1; gapLen = 0;
+      } else if (segStart >= 0) {
+        if (gapStart < 0) gapStart = x;
+        gapLen++;
+        if (gapLen >= gapThreshold) {
+          rawSegs.push([segStart, gapStart]);
+          segStart = -1; gapStart = -1; gapLen = 0;
+        }
+      }
+    }
+    if (segStart >= 0) rawSegs.push([segStart, aw]);
+    if (rawSegs.length <= 1 || rawSegs.length > WORD_MAX_SEGMENTS) return null;
+
+    const inv = 1 / scale;
+    const out = [];
+    for (const [sx, ex] of rawSegs) {
+      // Tighten the y-extent to this segment's own ink rows.
+      let y0 = -1, y1 = -1;
+      for (let y = 0; y < ah; y++) {
+        let hasInk = false;
+        for (let x = sx; x < ex; x++) {
+          const isDark = gray[y * aw + x] < t;
+          if (textIsDark ? isDark : !isDark) { hasInk = true; break; }
+        }
+        if (hasInk) { if (y0 < 0) y0 = y; y1 = y; }
+      }
+      if (y0 < 0) continue; // shouldn't happen (segment came from a nonzero colInk range)
+      const segW = ex - sx, segH = y1 - y0 + 1;
+      const padX = Math.max(1, Math.round(segW * 0.15));
+      const padY = Math.max(1, Math.round(segH * 0.15));
+      const ax0 = Math.max(0, sx - padX), ax1 = Math.min(aw, ex + padX);
+      const ay0 = Math.max(0, y0 - padY), ay1 = Math.min(ah, y1 + 1 + padY);
+      out.push({
+        x0: clamp(Math.round(ax0 * inv), 0, lw - 1),
+        x1: clamp(Math.round(ax1 * inv), 1, lw),
+        y0: clamp(Math.round(ay0 * inv), 0, lh - 1),
+        y1: clamp(Math.round(ay1 * inv), 1, lh)
+      });
+    }
+    return out.length > 1 ? out : null;
+  }
+
   // Resize a single-line image to height 48 (proportional width), build the
   // BGR CHW float tensor, run rec, CTC-greedy decode.
   // Returns { text, score }: score is the mean of the argmax probabilities
@@ -840,6 +988,14 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
     return { text: s.trim(), score: scoreCount ? scoreSum / scoreCount : 0 };
   }
 
+  // Crop a sub-region (in a canvas's own pixel coordinates) into a new canvas.
+  function subCanvas(src, box) {
+    const w = Math.max(1, box.x1 - box.x0), h = Math.max(1, box.y1 - box.y0);
+    const c = newCanvas(w, h);
+    c.getContext("2d").drawImage(src, box.x0, box.y0, w, h, 0, 0, w, h);
+    return c;
+  }
+
   // PaddleOCR CTC decode has no built-in confidence rejection in this
   // rec-only setup, but upstream PaddleOCR drops results with score < 0.5;
   // do the same here so noise-only bands (fed in by findTextBands on crops
@@ -847,6 +1003,17 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
   // ch(+ASCII) dictionary hallucinates CJK glyphs on pure noise, and this
   // path (paddleRecognize) is only ever used in 英数字 mode (see runOcr),
   // so stripping non-ASCII here is a safe, always-applicable post-filter.
+  //
+  // Each line band is further split into per-word sub-images by
+  // segmentWordsInLine (see there) -- "as if a human had drawn a box around
+  // each word" -- and each word is recognized and confidence-gated
+  // independently. This is what lets a single failing word (e.g. a barcode
+  // stripe segment mis-banded next to real digits) get dropped WITHOUT
+  // taking the rest of the line down with it, and lets multi-word lines
+  // survive even when the CTC decoder doesn't reliably emit a space between
+  // words on this input. When segmentWordsInLine finds nothing to split
+  // (one block, or too many to plausibly be words), the band is recognized
+  // whole exactly as before.
   async function paddleRecognize(cropCanvas, onStatus) {
     const { session, dict } = await getPaddle(onStatus);
     const ort = window.ort;
@@ -855,11 +1022,25 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
     const kept = [];
     for (let i = 0; i < bands.length; i++) {
       const lc = lineCanvasFrom(cropCanvas, bands[i]);
-      const { text, score } = await recOne(ort, session, dict, lc);
-      if (!text || score < 0.5) continue;
-      const ascii = text.replace(/[^\x00-\x7F]/g, "").replace(/[ \t]+/g, " ").trim();
-      if (!ascii) continue;
-      kept.push({ text: ascii, score });
+      const wordBoxes = segmentWordsInLine(lc);
+      const wordResults = [];
+      if (!wordBoxes) {
+        wordResults.push(await recOne(ort, session, dict, lc));
+      } else {
+        for (const box of wordBoxes) {
+          wordResults.push(await recOne(ort, session, dict, subCanvas(lc, box)));
+        }
+      }
+      const keptWords = [];
+      for (const { text, score } of wordResults) {
+        if (!text || score < 0.5) continue;
+        const ascii = text.replace(/[^\x00-\x7F]/g, "").replace(/[ \t]+/g, " ").trim();
+        if (!ascii) continue;
+        keptWords.push({ text: ascii, score });
+      }
+      if (!keptWords.length) continue;
+      const lineScore = keptWords.reduce((a, k) => a + k.score, 0) / keptWords.length;
+      kept.push({ text: keptWords.map((k) => k.text).join(" "), score: lineScore });
     }
     if (onStatus) onStatus("完了", 1);
     if (!kept.length) return { text: "", score: null };
