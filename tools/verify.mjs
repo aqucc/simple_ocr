@@ -32,7 +32,7 @@ const globalRoot = execSync("npm root -g").toString().trim();
 const chromeBin = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome";
 
 // ---- pinned assets (must match index.html) ----
-const VER = { vue: "3.4.38", tess: "5.1.1", core: "5.1.1", eng: "1.0.0" };
+const VER = { vue: "3.4.38", tess: "5.1.1", core: "5.1.1", eng: "1.0.0", jpn: "1.0.0" };
 const CACHE_FILES = {
   "vue.runtime.global.prod.js": join(cacheDir, "vue", "vue.runtime.global.prod.js"),
   "tesseract.min.js": join(cacheDir, "tesseract.js", "dist", "tesseract.min.js"),
@@ -41,10 +41,26 @@ const CACHE_FILES = {
   "tesseract-core.wasm.js": join(cacheDir, "tesseract.js-core", "tesseract-core.wasm.js"),
   "tesseract-core-simd.wasm.js": join(cacheDir, "tesseract.js-core", "tesseract-core-simd.wasm.js"),
   "tesseract-core-lstm.wasm.js": join(cacheDir, "tesseract.js-core", "tesseract-core-lstm.wasm.js"),
-  "eng.traineddata.gz": join(cacheDir, "eng", "eng.traineddata.gz")
+  "eng.traineddata.gz": join(cacheDir, "eng", "eng.traineddata.gz"),
+  "jpn.traineddata.gz": join(cacheDir, "jpn", "jpn.traineddata.gz")
 };
 
 function log(...a) { console.log(...a); }
+
+// Does this container have a CJK-capable font installed? If not, canvas-rendered
+// Japanese glyphs would come out as tofu boxes and OCR-ing them proves nothing.
+// In that case we fall back to an ASCII-only image in jpn mode, which still
+// proves the jpn worker/traineddata pipeline works end-to-end.
+function detectCjkFont() {
+  try {
+    const out = execSync("fc-list", { encoding: "utf8" });
+    const lines = out.split("\n").filter((l) => /cjk|noto sans jp|noto serif jp|ipagothic|ipa gothic|migu|takao|vlgothic/i.test(l));
+    if (lines.length === 0) return null;
+    const line = lines.find((l) => /cjk/i.test(l)) || lines[0];
+    const family = (line.split(":")[1] || "").split(",")[0].trim();
+    return family || null;
+  } catch (e) { return null; }
+}
 
 // Populate the local CDN cache from npm tarballs if any file is missing.
 function ensureCache() {
@@ -61,11 +77,13 @@ function ensureCache() {
   grab("tess", `https://registry.npmjs.org/tesseract.js/-/tesseract.js-${VER.tess}.tgz`);
   grab("core", `https://registry.npmjs.org/tesseract.js-core/-/tesseract.js-core-${VER.core}.tgz`);
   grab("eng", `https://registry.npmjs.org/@tesseract.js-data/eng/-/eng-${VER.eng}.tgz`);
+  grab("jpn", `https://registry.npmjs.org/@tesseract.js-data/jpn/-/jpn-${VER.jpn}.tgz`);
 
   mkdirSync(join(cacheDir, "vue"), { recursive: true });
   mkdirSync(join(cacheDir, "tesseract.js", "dist"), { recursive: true });
   mkdirSync(join(cacheDir, "tesseract.js-core"), { recursive: true });
   mkdirSync(join(cacheDir, "eng"), { recursive: true });
+  mkdirSync(join(cacheDir, "jpn"), { recursive: true });
   copyFileSync(join(tmp, "vue", "package", "dist", "vue.runtime.global.prod.js"), CACHE_FILES["vue.runtime.global.prod.js"]);
   copyFileSync(join(tmp, "tess", "package", "dist", "tesseract.min.js"), CACHE_FILES["tesseract.min.js"]);
   copyFileSync(join(tmp, "tess", "package", "dist", "worker.min.js"), CACHE_FILES["worker.min.js"]);
@@ -73,6 +91,7 @@ function ensureCache() {
     copyFileSync(join(tmp, "core", "package", f), CACHE_FILES[f]);
   }
   copyFileSync(join(tmp, "eng", "package", "4.0.0_best_int", "eng.traineddata.gz"), CACHE_FILES["eng.traineddata.gz"]);
+  copyFileSync(join(tmp, "jpn", "package", "4.0.0_best_int", "jpn.traineddata.gz"), CACHE_FILES["jpn.traineddata.gz"]);
   log("CDN cache built.");
 }
 
@@ -225,13 +244,88 @@ async function main() {
   if (!persisted) return fail("Record did not persist across reload (IndexedDB).");
   log("Step 5: record persisted across reload (IndexedDB).");
 
+  // ---- Japanese OCR mode ----
+  const cjkFamily = detectCjkFont();
+  log(cjkFamily
+    ? `CJK font detected on this system: "${cjkFamily}" -> running CJK-glyph variant.`
+    : "No CJK font detected (fc-list has no cjk/noto-jp match) -> running ASCII-in-jpn-mode variant.");
+
+  await page.getByText("撮影", { exact: true }).click();
+  await page.waitForSelector(".card", { timeout: 8000 });
+
+  await page.getByText("日本語+英数字", { exact: true }).click();
+  await page.waitForFunction(() => {
+    const btns = [...document.querySelectorAll(".nav button")];
+    const jpnBtn = btns.find((b) => b.textContent.includes("日本語"));
+    return !!jpnBtn && jpnBtn.classList.contains("active");
+  }, { timeout: 5000 });
+  log("Step 6: switched capture view to 日本語+英数字 mode.");
+
+  const hintShown = await page.evaluate(() =>
+    [...document.querySelectorAll(".hint")].some((h) => /日本語/.test(h.textContent) && /MB/i.test(h.textContent)));
+  if (!hintShown) return fail("Japanese-mode first-download size hint (.hint, mentions MB) not shown.");
+  log("Step 7: first-download size hint shown for jpn mode.");
+
+  const variant = cjkFamily ? "cjk" : "ascii";
+  await page.evaluate(({ variant, cjkFamily }) => {
+    const c = document.createElement("canvas");
+    c.width = 700; c.height = 220;
+    const x = c.getContext("2d");
+    x.fillStyle = "#fff"; x.fillRect(0, 0, c.width, c.height);
+    x.fillStyle = "#000"; x.textBaseline = "top";
+    if (variant === "cjk") {
+      x.font = `32px "${cjkFamily}"`;
+      x.fillText("型番 KX-1234", 30, 60);
+    } else {
+      x.font = "28px monospace";
+      x.fillText("MODEL KX-9876", 30, 50);
+      x.fillText("TYPE JP-TEST", 30, 120);
+    }
+    return new Promise((resolve) => {
+      c.toBlob((blob) => {
+        const file = new File([blob], "label-jpn.png", { type: "image/png" });
+        const input = document.querySelector('input[type=file]:not([capture])');
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        input.files = dt.files;
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        resolve();
+      }, "image/png");
+    });
+  }, { variant, cjkFamily });
+  log(`Step 8: jpn-mode ${variant === "cjk" ? "CJK label (型番 KX-1234)" : "ASCII label (MODEL KX-9876 / TYPE JP-TEST)"} image injected, OCR running (variant: ${variant})...`);
+
+  try {
+    await page.waitForSelector("textarea", { timeout: 150000 });
+    await page.waitForFunction((v) => {
+      const ta = document.querySelector("textarea");
+      if (!ta) return false;
+      const t = ta.value;
+      if (v === "cjk") {
+        return /KX/i.test(t) && /1234/.test(t) && /[぀-ヿ㐀-䶿一-鿿]/.test(t);
+      }
+      return /KX/i.test(t) && /9876/.test(t);
+    }, variant, { timeout: 150000 });
+  } catch (e) {
+    const ta = await page.evaluate(() => { const t = document.querySelector("textarea"); return t ? t.value : "(no textarea)"; });
+    return fail("Japanese-mode OCR text assertion failed (variant: " + variant + "). textarea value was:\n" + ta);
+  }
+  const jpnRecognized = await page.evaluate(() => document.querySelector("textarea").value);
+  log(`Step 9: jpn-mode OCR succeeded (${variant} variant). Recognized:\n  ` + jpnRecognized.replace(/\n/g, "\\n"));
+
+  if (cspViolations.length) return fail("CSP violation(s) occurred during Japanese-mode OCR.");
+  const cspFromPage2 = await page.evaluate(() => window.__csp || []);
+  if (cspFromPage2.length) { cspViolations.push(...cspFromPage2); return fail("securitypolicyviolation events fired during Japanese-mode OCR."); }
+
+  await page.getByText("破棄", { exact: true }).click();
+
   if (errors.length) return fail("JS errors were collected during the run.");
   if (cspViolations.length) return fail("CSP violations were collected during the run.");
 
   await browser.close();
   server.close();
   log("\n==================== VERIFY PASSED ====================");
-  log("No CSP violations, no JS errors. OCR + save + calendar + persistence all OK.");
+  log(`No CSP violations, no JS errors. OCR (eng) + save + calendar + persistence all OK. Japanese mode OCR (${variant} variant) OK.`);
   process.exit(0);
 }
 
