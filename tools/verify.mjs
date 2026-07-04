@@ -32,7 +32,7 @@ const globalRoot = execSync("npm root -g").toString().trim();
 const chromeBin = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome";
 
 // ---- pinned assets (must match index.html) ----
-const VER = { vue: "3.4.38", tess: "5.1.1", core: "5.1.1", eng: "1.0.0", jpn: "1.0.0", ort: "1.19.2", models: "1.4.2" };
+const VER = { vue: "3.4.38", tess: "5.1.1", core: "5.1.1", eng: "1.0.0", jpn: "1.0.0", ort: "1.19.2", models: "1.4.2", wordlist: "4.1.0" };
 const CACHE_FILES = {
   "vue.runtime.global.prod.js": join(cacheDir, "vue", "vue.runtime.global.prod.js"),
   "tesseract.min.js": join(cacheDir, "tesseract.js", "dist", "tesseract.min.js"),
@@ -51,7 +51,9 @@ const CACHE_FILES = {
   "ort-wasm-simd-threaded.jsep.wasm": join(cacheDir, "onnxruntime-web", "ort-wasm-simd-threaded.jsep.wasm"),
   // PP-OCRv4 recognition model + dictionary (@gutenye/ocr-models)
   "ch_PP-OCRv4_rec_infer.onnx": join(cacheDir, "ocr-models", "ch_PP-OCRv4_rec_infer.onnx"),
-  "ppocr_keys_v1.txt": join(cacheDir, "ocr-models", "ppocr_keys_v1.txt")
+  "ppocr_keys_v1.txt": join(cacheDir, "ocr-models", "ppocr_keys_v1.txt"),
+  // English wordlist for the 単語フィルタ (word filter) dictionary check
+  "words.txt": join(cacheDir, "word-list", "words.txt")
 };
 
 function log(...a) { console.log(...a); }
@@ -105,6 +107,7 @@ function ensureCache() {
   grab("jpn", `https://registry.npmjs.org/@tesseract.js-data/jpn/-/jpn-${VER.jpn}.tgz`);
   grab("ort", `https://registry.npmjs.org/onnxruntime-web/-/onnxruntime-web-${VER.ort}.tgz`);
   grab("models", `https://registry.npmjs.org/@gutenye/ocr-models/-/ocr-models-${VER.models}.tgz`);
+  grab("wordlist", `https://registry.npmjs.org/word-list/-/word-list-${VER.wordlist}.tgz`);
 
   mkdirSync(join(cacheDir, "vue"), { recursive: true });
   mkdirSync(join(cacheDir, "tesseract.js", "dist"), { recursive: true });
@@ -113,6 +116,7 @@ function ensureCache() {
   mkdirSync(join(cacheDir, "jpn"), { recursive: true });
   mkdirSync(join(cacheDir, "onnxruntime-web"), { recursive: true });
   mkdirSync(join(cacheDir, "ocr-models"), { recursive: true });
+  mkdirSync(join(cacheDir, "word-list"), { recursive: true });
   copyFileSync(join(tmp, "vue", "package", "dist", "vue.runtime.global.prod.js"), CACHE_FILES["vue.runtime.global.prod.js"]);
   copyFileSync(join(tmp, "tess", "package", "dist", "tesseract.min.js"), CACHE_FILES["tesseract.min.js"]);
   copyFileSync(join(tmp, "tess", "package", "dist", "worker.min.js"), CACHE_FILES["worker.min.js"]);
@@ -126,6 +130,7 @@ function ensureCache() {
   }
   copyFileSync(join(tmp, "models", "package", "assets", "ch_PP-OCRv4_rec_infer.onnx"), CACHE_FILES["ch_PP-OCRv4_rec_infer.onnx"]);
   copyFileSync(join(tmp, "models", "package", "assets", "ppocr_keys_v1.txt"), CACHE_FILES["ppocr_keys_v1.txt"]);
+  copyFileSync(join(tmp, "wordlist", "package", "words.txt"), CACHE_FILES["words.txt"]);
   log("CDN cache built.");
 }
 
@@ -476,16 +481,109 @@ async function main() {
   const cspFromPage2 = await page.evaluate(() => window.__csp || []);
   if (cspFromPage2.length) { cspViolations.push(...cspFromPage2); return fail("securitypolicyviolation events fired during Japanese-mode OCR."); }
 
+  // ---- 単語フィルタ (word filter) test: decoy cert-mark image on the
+  // cropped 英数字 (Paddle) path ----
+  // A circled "R" (plausible misread source for registered-trademark /
+  // certification-mark logos), a boxed kanji "検" (IPAGothic, only drawn if
+  // a CJK font is available), a stray triangle shape, plus the usual
+  // model/serial lines and two real-English-word lines ("MADE" / "JAPAN").
+  // MADE and JAPAN are deliberately on their own lines rather than one
+  // "MADE IN JAPAN" line: this PP-OCRv4 rec model, on this synthetic
+  // monospace rendering, does not reliably predict a space character
+  // *between* words on the same line (verified empirically -- "MODEL:
+  // KX-1234AB" and "S/N 5X-98765" already come back space-free as
+  // "MODELKX-1234AB" / "S/N5X-98765", which happens to still classify fine
+  // as one model-like blob) so relying on inter-word spacing within a line
+  // for a spaceless-when-merged, no-digit English word would be flaky. Each
+  // word gets its own findTextBands line instead, sidestepping that.
+  // Note: PaddleOCR's rec-only pipeline already strips all non-ASCII output
+  // (see paddleRecognize's ascii-strip), so the boxed kanji can never reach
+  // this path's text regardless of the new word filter -- it's included for
+  // scene realism and to prove the extra glyph doesn't break line/band
+  // detection. The CJK single-run-length rule is exercised end-to-end by
+  // the jpn-mode tests above/below instead.
+  async function generateDecoyLabelDataUrl(cjkFamily) {
+    return await page.evaluate(({ cjkFamily }) => {
+      const c = document.createElement("canvas");
+      c.width = 760; c.height = 320;
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
+      ctx.fillStyle = "#000"; ctx.strokeStyle = "#000"; ctx.lineWidth = 2;
+
+      // Circled "R" -- registered-trademark-style cert mark misread source.
+      ctx.beginPath(); ctx.arc(40, 40, 20, 0, Math.PI * 2); ctx.stroke();
+      ctx.font = "22px monospace"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText("R", 40, 41);
+
+      // Boxed kanji "検" -- squared cert-mark misread source (only if a CJK
+      // font is available in this environment).
+      if (cjkFamily) {
+        ctx.strokeRect(85, 20, 40, 40);
+        ctx.font = `26px "${cjkFamily}"`;
+        ctx.fillText("検", 105, 41);
+      }
+
+      // Stray triangle shape (no character inside, just geometry to misread).
+      ctx.beginPath();
+      ctx.moveTo(150, 55); ctx.lineTo(170, 20); ctx.lineTo(190, 55); ctx.closePath();
+      ctx.stroke();
+
+      ctx.textAlign = "left"; ctx.textBaseline = "top"; ctx.font = "26px monospace";
+      ctx.fillText("MODEL: KX-1234AB", 30, 90);
+      ctx.fillText("S/N 5X-98765", 30, 150);
+      ctx.fillText("MADE", 30, 210);
+      ctx.fillText("JAPAN", 30, 270);
+      return c.toDataURL("image/png");
+    }, { cjkFamily });
+  }
+
+  const DECOY_LABEL_STRINGS = ["MODEL: KX-1234AB", "S/N 5X-98765", "MADE", "JAPAN"];
+  const decoyDataUrl = await generateDecoyLabelDataUrl(cjkFamily);
+  log("Step 10: decoy label image generated (circled R, boxed kanji, triangle, model/serial, MADE, JAPAN).");
+
+  await page.getByText("破棄", { exact: true }).click();
+  await page.waitForSelector(".card", { timeout: 8000 });
+  await page.getByText("英数字(型番向け)", { exact: true }).click();
+  await page.waitForFunction(() => {
+    const b = [...document.querySelectorAll(".nav button")].find((el) => el.textContent.includes("英数字"));
+    return !!b && b.classList.contains("active");
+  }, { timeout: 5000 });
+
+  await injectDataUrlFile(decoyDataUrl, "decoy-label.png");
+  await expandCropToFull();
+  await page.getByText("この範囲を読み取る", { exact: true }).click();
+  await assertResult("Decoy-Paddle-crop", "KX[-—_ ]?1234AB", "98765");
+  const engineDecoy = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
+  if (!/PaddleOCR/.test(engineDecoy)) return fail("Expected PaddleOCR engine for decoy cropped 英数字 path, got: " + engineDecoy);
+
+  const wfLabelOn = await page.evaluate(() => { const b = document.querySelector(".wftoggle"); return b ? b.textContent : ""; });
+  if (wfLabelOn !== "ON") return fail("Expected 単語フィルタ toggle to default to ON, got: " + wfLabelOn);
+
+  const decoyFilteredText = await page.evaluate(() => document.querySelector("textarea").value);
+  if (!/MADE/.test(decoyFilteredText)) return fail("Decoy test: filtered text missing MADE. Text was:\n" + decoyFilteredText);
+  if (!/JAPAN/.test(decoyFilteredText)) return fail("Decoy test: filtered text missing JAPAN. Text was:\n" + decoyFilteredText);
+  const decoyTokens = decoyFilteredText.split(/\s+/).filter(Boolean);
+  const singleCharTok = decoyTokens.find((t) => [...t].length === 1);
+  if (singleCharTok) return fail("Decoy test: found a standalone single-character token (\"" + singleCharTok + "\") in filtered text:\n" + decoyFilteredText);
+  const garbageDecoy = countGarbage(decoyFilteredText, DECOY_LABEL_STRINGS);
+  log("Step 11: decoy-image Paddle-crop filtered text (garbage=" + garbageDecoy + "):\n  " + decoyFilteredText.replace(/\n/g, "\\n"));
+  if (garbageDecoy > 2) return fail("Decoy test garbage count too high (" + garbageDecoy + " > 2). Filtered text:\n" + decoyFilteredText);
+
+  if (cspViolations.length) return fail("CSP violation(s) occurred during decoy-image OCR.");
+  const cspFromPage5 = await page.evaluate(() => window.__csp || []);
+  if (cspFromPage5.length) { cspViolations.push(...cspFromPage5); return fail("securitypolicyviolation events fired during decoy-image OCR."); }
+
+  await page.getByText("破棄", { exact: true }).click();
+  await page.waitForSelector(".card", { timeout: 8000 });
+
   // ---- Noise-robustness test (acceptance gate for the hallucination fixes) ----
   // A background-noise-only crop should no longer surface hallucinated
   // characters: Paddle via confidence rejection (score < 0.5) + ASCII-only
   // post-filter, Tesseract via adaptive-threshold + despeckle preprocessing
   // plus the word-confidence filter.
   const noisyDataUrl = await generateNoisyLabelDataUrl();
-  log("Step 10: noisy label image generated (gradient bg + ~800 speckles + vignette).");
+  log("Step 14: noisy label image generated (gradient bg + ~800 speckles + vignette).");
 
-  await page.getByText("破棄", { exact: true }).click();
-  await page.waitForSelector(".card", { timeout: 8000 });
   await page.getByText("英数字(型番向け)", { exact: true }).click();
   await page.waitForFunction(() => {
     const b = [...document.querySelectorAll(".nav button")].find((el) => el.textContent.includes("英数字"));
@@ -500,8 +598,36 @@ async function main() {
   const engineNoisyPaddle = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
   if (!/PaddleOCR/.test(engineNoisyPaddle)) return fail("Expected PaddleOCR engine for noisy cropped 英数字 path, got: " + engineNoisyPaddle);
   const garbagePaddle = countGarbage(noisyPaddleText, NOISE_LABEL_STRINGS);
-  log("Step 11: noisy-image Paddle-crop recognized (garbage=" + garbagePaddle + "):\n  " + noisyPaddleText.replace(/\n/g, "\\n"));
+  log("Step 15: noisy-image Paddle-crop recognized (garbage=" + garbagePaddle + "):\n  " + noisyPaddleText.replace(/\n/g, "\\n"));
   if (garbagePaddle > 3) return fail("Noise test (Paddle) garbage count too high (" + garbagePaddle + " > 3). Recognized text:\n" + noisyPaddleText);
+
+  // ---- 単語フィルタ toggle test ----
+  // This noisy image is where the word filter has visible work to do: it's
+  // the mechanism-proof the spec asks for -- toggle OFF must reveal the raw
+  // (pre-word-filter) text, and raw garbage must never be *lower* than
+  // filtered garbage (the filter only ever removes noise, never adds it).
+  const wfLabelNoisyOn = await page.evaluate(() => { const b = document.querySelector(".wftoggle"); return b ? b.textContent : ""; });
+  if (wfLabelNoisyOn !== "ON") return fail("Expected 単語フィルタ toggle to default to ON, got: " + wfLabelNoisyOn);
+  await page.click(".wftoggle");
+  await page.waitForFunction(() => {
+    const b = document.querySelector(".wftoggle"); return b && b.textContent === "OFF";
+  }, { timeout: 3000 });
+  const noisyPaddleRawText = await page.evaluate(() => document.querySelector("textarea").value);
+  const garbagePaddleRaw = countGarbage(noisyPaddleRawText, NOISE_LABEL_STRINGS);
+  log("Step 15b: 単語フィルタ toggled OFF on noisy Paddle-crop; raw garbage=" + garbagePaddleRaw + ":\n  " + noisyPaddleRawText.replace(/\n/g, "\\n"));
+  if (!/KX/i.test(noisyPaddleRawText) || !/98765/.test(noisyPaddleRawText)) {
+    return fail("Toggled-off raw text lost expected model/serial content:\n" + noisyPaddleRawText);
+  }
+  if (garbagePaddleRaw < garbagePaddle) {
+    return fail("Toggle mechanism check failed: raw garbage (" + garbagePaddleRaw + ") should be >= filtered garbage (" + garbagePaddle +
+      ").\nraw: " + noisyPaddleRawText + "\nfiltered: " + noisyPaddleText);
+  }
+  // Toggle back ON, restoring the default for the rest of the run.
+  await page.click(".wftoggle");
+  await page.waitForFunction(() => {
+    const b = document.querySelector(".wftoggle"); return b && b.textContent === "ON";
+  }, { timeout: 3000 });
+  log("Step 15c: toggle mechanism confirmed (raw garbage=" + garbagePaddleRaw + " >= filtered garbage=" + garbagePaddle + ").");
 
   if (cspViolations.length) return fail("CSP violation(s) occurred during noisy Paddle OCR.");
   const cspFromPage3 = await page.evaluate(() => window.__csp || []);
@@ -526,7 +652,7 @@ async function main() {
   const engineNoisyTess = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
   if (!/Tesseract/.test(engineNoisyTess)) return fail("Expected Tesseract engine for noisy cropped jpn path, got: " + engineNoisyTess);
   const garbageTess = countGarbage(noisyTessText, NOISE_LABEL_STRINGS);
-  log("Step 12: noisy-image Tesseract-crop (jpn mode) recognized (garbage=" + garbageTess + "):\n  " + noisyTessText.replace(/\n/g, "\\n"));
+  log("Step 16: noisy-image Tesseract-crop (jpn mode) recognized (garbage=" + garbageTess + "):\n  " + noisyTessText.replace(/\n/g, "\\n"));
   if (garbageTess > 6) return fail("Noise test (Tesseract) garbage count too high (" + garbageTess + " > 6). Recognized text:\n" + noisyTessText);
 
   if (cspViolations.length) return fail("CSP violation(s) occurred during noisy Tesseract OCR.");
