@@ -42,3 +42,9 @@ jobs:
 
       - id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          # GitHub の Pages バックエンドがまれに即時 "Deployment failed,
+          # try again later" を返すため、リトライ許容回数と間隔を広げる。
+          timeout: 600000
+          error_count: 15
+          reporting_interval: 5000
