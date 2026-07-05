@@ -194,10 +194,12 @@ async function main() {
     }
   });
 
+  const deskewMsgs = [];
   const page = await context.newPage();
   page.on("console", (m) => {
     const t = m.text();
     if (/content security policy|refused to (load|execute|connect|apply)/i.test(t)) cspViolations.push(t);
+    if (/deskew: chosen correction angle/i.test(t)) deskewMsgs.push(t);
     if (m.type() === "error") errors.push("console.error: " + t);
   });
   page.on("pageerror", (e) => errors.push("pageerror: " + e.message));
@@ -960,6 +962,195 @@ async function main() {
   if (cspViolations.length) return fail("CSP violation(s) occurred during noisy Tesseract OCR.");
   const cspFromPage4 = await page.evaluate(() => window.__csp || []);
   if (cspFromPage4.length) { cspViolations.push(...cspFromPage4); return fail("securitypolicyviolation events fired during noisy Tesseract OCR."); }
+
+  await page.getByText("破棄", { exact: true }).click();
+  await page.waitForSelector(".card", { timeout: 8000 });
+
+  // ---- Perspective (台形補正) test ----
+  // Render the standard label, then warp it onto a larger gray canvas using a
+  // known trapezoid quad (top edge inset 12% each side) via a test-side
+  // inverse-homography sampler. Feed it in, switch to 台形補正, drag the 4
+  // corner handles onto the known quad, run the 英数字/Paddle path, assert the
+  // model/serial survive the de-warp.
+  const perspQuad = {
+    tl: { fx: 0.2264, fy: 0.16 }, tr: { fx: 0.7736, fy: 0.16 },
+    br: { fx: 0.86, fy: 0.84 }, bl: { fx: 0.14, fy: 0.84 }
+  };
+  async function generatePerspectiveLabelDataUrl(quad) {
+    return await page.evaluate((quad) => {
+      // Flat source label.
+      const lw = 560, lh = 180;
+      const lc = document.createElement("canvas"); lc.width = lw; lc.height = lh;
+      const lx = lc.getContext("2d");
+      lx.fillStyle = "#fff"; lx.fillRect(0, 0, lw, lh);
+      lx.fillStyle = "#000"; lx.font = "26px monospace"; lx.textBaseline = "top";
+      lx.fillText("MODEL: KX-1234AB", 24, 40);
+      lx.fillText("S/N 5X-98765", 24, 105);
+      const ld = lx.getImageData(0, 0, lw, lh).data;
+
+      // Big canvas, gray background.
+      const Wc = 820, Hc = 460;
+      const c = document.createElement("canvas"); c.width = Wc; c.height = Hc;
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "#8a8a8a"; ctx.fillRect(0, 0, Wc, Hc);
+      const img = ctx.getImageData(0, 0, Wc, Hc); const od = img.data;
+
+      // Quad in big-canvas pixels (label placement).
+      const Q = {
+        tl: { x: quad.tl.fx * Wc, y: quad.tl.fy * Hc }, tr: { x: quad.tr.fx * Wc, y: quad.tr.fy * Hc },
+        br: { x: quad.br.fx * Wc, y: quad.br.fy * Hc }, bl: { x: quad.bl.fx * Wc, y: quad.bl.fy * Hc }
+      };
+      // Homography mapping big-canvas coords -> flat label coords (Gauss-Jordan).
+      function solveH(src, dst) {
+        const A = [], b = [];
+        for (let i = 0; i < 4; i++) {
+          const x = src[i].x, y = src[i].y, X = dst[i].x, Y = dst[i].y;
+          A.push([x, y, 1, 0, 0, 0, -x * X, -y * X]); b.push(X);
+          A.push([0, 0, 0, x, y, 1, -x * Y, -y * Y]); b.push(Y);
+        }
+        const n = 8;
+        for (let col = 0; col < n; col++) {
+          let piv = col;
+          for (let r = col + 1; r < n; r++) if (Math.abs(A[r][col]) > Math.abs(A[piv][col])) piv = r;
+          if (piv !== col) { const t = A[piv]; A[piv] = A[col]; A[col] = t; const tb = b[piv]; b[piv] = b[col]; b[col] = tb; }
+          const pv = A[col][col]; if (Math.abs(pv) < 1e-12) continue;
+          for (let r = 0; r < n; r++) {
+            if (r === col) continue; const f = A[r][col] / pv; if (f === 0) continue;
+            for (let cc = col; cc < n; cc++) A[r][cc] -= f * A[col][cc]; b[r] -= f * b[col];
+          }
+        }
+        const hh = new Array(9);
+        for (let i = 0; i < n; i++) hh[i] = Math.abs(A[i][i]) < 1e-12 ? 0 : b[i] / A[i][i];
+        hh[8] = 1; return hh;
+      }
+      const srcPts = [Q.tl, Q.tr, Q.br, Q.bl];
+      const dstPts = [{ x: 0, y: 0 }, { x: lw, y: 0 }, { x: lw, y: lh }, { x: 0, y: lh }];
+      const H = solveH(srcPts, dstPts);
+      const xs = srcPts.map((p) => p.x), ys = srcPts.map((p) => p.y);
+      const bx0 = Math.max(0, Math.floor(Math.min.apply(null, xs))), by0 = Math.max(0, Math.floor(Math.min.apply(null, ys)));
+      const bx1 = Math.min(Wc, Math.ceil(Math.max.apply(null, xs))), by1 = Math.min(Hc, Math.ceil(Math.max.apply(null, ys)));
+      for (let y = by0; y < by1; y++) {
+        for (let x = bx0; x < bx1; x++) {
+          const den = H[6] * x + H[7] * y + H[8];
+          const lxp = (H[0] * x + H[1] * y + H[2]) / den, lyp = (H[3] * x + H[4] * y + H[5]) / den;
+          if (lxp < 0 || lyp < 0 || lxp > lw - 1 || lyp > lh - 1) continue;
+          const x0 = lxp | 0, y0 = lyp | 0;
+          const x1 = Math.min(x0 + 1, lw - 1), y1 = Math.min(y0 + 1, lh - 1);
+          const fx = lxp - x0, fy = lyp - y0; const oi = (y * Wc + x) * 4;
+          for (let ch = 0; ch < 3; ch++) {
+            const p00 = ld[(y0 * lw + x0) * 4 + ch], p10 = ld[(y0 * lw + x1) * 4 + ch];
+            const p01 = ld[(y1 * lw + x0) * 4 + ch], p11 = ld[(y1 * lw + x1) * 4 + ch];
+            const a = p00 + (p10 - p00) * fx, bb = p01 + (p11 - p01) * fx;
+            od[oi + ch] = a + (bb - a) * fy;
+          }
+          od[oi + 3] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+      return c.toDataURL("image/png");
+    }, quad);
+  }
+
+  await page.getByText("英数字(型番向け)", { exact: true }).click();
+  await page.waitForFunction(() => {
+    const b = [...document.querySelectorAll(".nav button")].find((el) => el.textContent.includes("英数字"));
+    return !!b && b.classList.contains("active");
+  }, { timeout: 5000 });
+
+  const perspDataUrl = await generatePerspectiveLabelDataUrl(perspQuad);
+  await injectDataUrlFile(perspDataUrl, "persp-label.png");
+  await page.waitForSelector(".crop-stage", { timeout: 10000 });
+  log("Step 17: perspective-distorted label injected (trapezoid, top edge inset 12% each side).");
+
+  // Enter 台形補正 mode (this also runs the auto-suggest quad detector).
+  await page.getByText("台形補正", { exact: true }).click();
+  await page.waitForSelector(".crop-handle.qh-tl", { timeout: 10000 });
+
+  // Auto-suggest sanity: did the detector move corners off the exact rect
+  // corners, or fall back cleanly? Assert no JS errors either way.
+  const suggested = await page.evaluate(() => {
+    const g = (k) => {
+      const el = document.querySelector(".crop-handle.qh-" + k);
+      const s = document.querySelector(".crop-stage");
+      const eb = el.getBoundingClientRect(), sb = s.getBoundingClientRect();
+      return { x: (eb.x + eb.width / 2 - sb.x) / sb.width, y: (eb.y + eb.height / 2 - sb.y) / sb.height };
+    };
+    return { tl: g("tl"), tr: g("tr"), br: g("br"), bl: g("bl") };
+  });
+  // Rect default corners are x in {0.1,0.9}, y in {0.35,0.65}.
+  const rectCorners = { tl: { x: 0.1, y: 0.35 }, tr: { x: 0.9, y: 0.35 }, br: { x: 0.9, y: 0.65 }, bl: { x: 0.1, y: 0.65 } };
+  let movedOff = false;
+  for (const k of ["tl", "tr", "br", "bl"]) {
+    if (Math.abs(suggested[k].x - rectCorners[k].x) > 0.02 || Math.abs(suggested[k].y - rectCorners[k].y) > 0.02) movedOff = true;
+  }
+  log("Step 17a: auto-suggest " + (movedOff ? "moved corners off the rect defaults (detection did something)" : "fell back to rect corners (clean fallback)") + ".");
+  if (errors.length) return fail("JS errors during 台形補正 auto-suggest.");
+
+  // Drag the 4 handles onto the known quad corners.
+  {
+    const stage = await (await page.$(".crop-stage")).boundingBox();
+    for (const key of ["tl", "tr", "br", "bl"]) {
+      const tx = stage.x + perspQuad[key].fx * stage.width;
+      const ty = stage.y + perspQuad[key].fy * stage.height;
+      await dragHandle(".crop-handle.qh-" + key, tx, ty);
+    }
+  }
+  await page.getByText("この範囲を読み取る", { exact: true }).click();
+  await assertResult("Perspective-Paddle-quad", "KX[-—_ ]?1234AB", "98765");
+  const enginePersp = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
+  if (!/PaddleOCR/.test(enginePersp)) return fail("Expected PaddleOCR engine for perspective quad path, got: " + enginePersp);
+  const perspText = await page.evaluate(() => document.querySelector("textarea").value);
+  log("Step 17b: perspective-corrected quad OCR via " + enginePersp + " matched. Recognized:\n  " + perspText.replace(/\n/g, "\\n"));
+
+  if (cspViolations.length) return fail("CSP violation(s) occurred during perspective OCR.");
+  const cspPersp = await page.evaluate(() => window.__csp || []);
+  if (cspPersp.length) { cspViolations.push(...cspPersp); return fail("securitypolicyviolation events fired during perspective OCR."); }
+
+  await page.getByText("破棄", { exact: true }).click();
+  await page.waitForSelector(".card", { timeout: 8000 });
+
+  // ---- Automatic deskew test ----
+  // Rotate the standard label 12° onto a white background, feed it in, normal
+  // 矩形 mode, expand rect to full, read. This must pass BECAUSE of the
+  // automatic deskew (row-projection-variance estimator + canvas rotate):
+  // with deskew disabled during development this same 12° crop returned an
+  // empty/garbled result from the Paddle rec path (an 8° tilt still read on
+  // its own, so 12° — the edge of the ±12° search range — is used to make the
+  // test genuinely depend on the correction).
+  async function generateRotatedLabelDataUrl(deg) {
+    return await page.evaluate((deg) => {
+      const lw = 700, lh = 240;
+      const lc = document.createElement("canvas"); lc.width = lw; lc.height = lh;
+      const lx = lc.getContext("2d");
+      lx.fillStyle = "#fff"; lx.fillRect(0, 0, lw, lh);
+      lx.fillStyle = "#000"; lx.font = "30px monospace"; lx.textBaseline = "top";
+      lx.fillText("MODEL: KX-1234AB", 40, 60);
+      lx.fillText("S/N 5X-98765", 40, 140);
+      const rad = deg * Math.PI / 180;
+      const cos = Math.abs(Math.cos(rad)), sin = Math.abs(Math.sin(rad));
+      const nw = Math.ceil(lw * cos + lh * sin), nh = Math.ceil(lw * sin + lh * cos);
+      const c = document.createElement("canvas"); c.width = nw; c.height = nh;
+      const ctx = c.getContext("2d");
+      ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, nw, nh);
+      ctx.translate(nw / 2, nh / 2); ctx.rotate(rad); ctx.drawImage(lc, -lw / 2, -lh / 2);
+      return c.toDataURL("image/png");
+    }, deg);
+  }
+  const rotDataUrl = await generateRotatedLabelDataUrl(12);
+  await injectDataUrlFile(rotDataUrl, "rot12-label.png");
+  await page.waitForSelector(".crop-stage", { timeout: 10000 });
+  log("Step 18: 12°-rotated label injected (矩形 mode; relies on automatic deskew).");
+  const deskewCountBefore = deskewMsgs.length;
+  await expandCropToFull();
+  await page.getByText("この範囲を読み取る", { exact: true }).click();
+  await assertResult("Deskew-Paddle-crop", "KX[-—_ ]?1234AB", "98765");
+  const deskewText = await page.evaluate(() => document.querySelector("textarea").value);
+  const chosenAngle = deskewMsgs.slice(deskewCountBefore).join(" | ") || "(none captured)";
+  log("Step 18b: deskew test matched. Chosen deskew angle log(s): " + chosenAngle + "\n  Recognized: " + deskewText.replace(/\n/g, "\\n"));
+
+  if (cspViolations.length) return fail("CSP violation(s) occurred during deskew OCR.");
+  const cspDeskew = await page.evaluate(() => window.__csp || []);
+  if (cspDeskew.length) { cspViolations.push(...cspDeskew); return fail("securitypolicyviolation events fired during deskew OCR."); }
 
   await page.getByText("破棄", { exact: true }).click();
 

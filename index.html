@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-jd7og4OQ/s8gvZKHzkt7UFK0963dDoHsXyLxWeQLNZY=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-8P0MTLtYZVqNYsgxcMTv9j8xnHYwOipaxwNdmBIDCmQ='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-li68jVFs0OrZdk4186GouQMEHdZLTWrsb9cvRiOnVjY=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-75l7J2Hvvw6MK4RsGMyIQi/a9GhqV6uFi4eAv9xR/Xc='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
 <title>ラベルOCR</title>
 <style>
 :root{
@@ -78,6 +78,13 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
 .crop-handle.ne{ right:-15px; top:-15px; cursor:nesw-resize; }
 .crop-handle.sw{ left:-15px; bottom:-15px; cursor:nesw-resize; }
 .crop-handle.se{ right:-15px; bottom:-15px; cursor:nwse-resize; }
+/* Quad (台形補正) overlay: SVG polygon outline + 4 free corner handles. */
+.quad-svg{ position:absolute; inset:0; width:100%; height:100%; pointer-events:none; overflow:visible; }
+.crop-handle.qh{ transform:translate(-50%,-50%); cursor:move; }
+.segctl{ display:inline-flex; border:1px solid var(--line); border-radius:10px; overflow:hidden; margin:0 0 10px; }
+.segctl button{ min-height:36px; padding:0 16px; border:none; background:var(--panel2);
+  color:var(--muted); font-size:13px; font-weight:800; }
+.segctl button.on{ background:var(--accent); color:#fff; }
 .cal{ background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
   padding:12px; margin-bottom:14px; }
 .calhead{ display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
@@ -775,6 +782,258 @@ details.acc .hint{ margin-top:0; }
     return c;
   }
 
+  // Return a drawable canvas for `src` (pass canvases through untouched).
+  function toCanvas(src) {
+    if (src && typeof src.getContext === "function") return src;
+    const { w, h } = dims(src);
+    const c = newCanvas(Math.max(1, w), Math.max(1, h));
+    c.getContext("2d").drawImage(src, 0, 0);
+    return c;
+  }
+
+  // ---------------- Perspective (台形) correction ----------------
+  // Solve the 8-unknown DLT system mapping four src points -> four dst points
+  // with plain Gauss-Jordan elimination. Returns the 3x3 homography flattened
+  // as [h0..h8] with h8 == 1. No libraries.
+  function solveHomography(src, dst) {
+    const A = [], b = [];
+    for (let i = 0; i < 4; i++) {
+      const x = src[i].x, y = src[i].y, X = dst[i].x, Y = dst[i].y;
+      A.push([x, y, 1, 0, 0, 0, -x * X, -y * X]); b.push(X);
+      A.push([0, 0, 0, x, y, 1, -x * Y, -y * Y]); b.push(Y);
+    }
+    const n = 8;
+    for (let col = 0; col < n; col++) {
+      let piv = col;
+      for (let r = col + 1; r < n; r++) if (Math.abs(A[r][col]) > Math.abs(A[piv][col])) piv = r;
+      if (piv !== col) { const t = A[piv]; A[piv] = A[col]; A[col] = t; const tb = b[piv]; b[piv] = b[col]; b[col] = tb; }
+      const pv = A[col][col];
+      if (Math.abs(pv) < 1e-12) continue;
+      for (let r = 0; r < n; r++) {
+        if (r === col) continue;
+        const f = A[r][col] / pv;
+        if (f === 0) continue;
+        for (let c = col; c < n; c++) A[r][c] -= f * A[col][c];
+        b[r] -= f * b[col];
+      }
+    }
+    const hh = new Array(9);
+    for (let i = 0; i < n; i++) hh[i] = Math.abs(A[i][i]) < 1e-12 ? 0 : b[i] / A[i][i];
+    hh[8] = 1;
+    return hh;
+  }
+
+  // Warp the quad (corners as fractions of the image box: {tl,tr,br,bl})
+  // to an upright rectangle via inverse-mapped bilinear sampling. Output
+  // size = mean of the opposite edge lengths, clamped [16, 2000].
+  function warpQuad(bmp, corners) {
+    const { w: iw, h: ih } = dims(bmp);
+    const P = {
+      tl: { x: corners.tl.x * iw, y: corners.tl.y * ih },
+      tr: { x: corners.tr.x * iw, y: corners.tr.y * ih },
+      br: { x: corners.br.x * iw, y: corners.br.y * ih },
+      bl: { x: corners.bl.x * iw, y: corners.bl.y * ih }
+    };
+    const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+    let W = Math.round((dist(P.tl, P.tr) + dist(P.bl, P.br)) / 2);
+    let H = Math.round((dist(P.tl, P.bl) + dist(P.tr, P.br)) / 2);
+    W = clamp(W, 16, 2000); H = clamp(H, 16, 2000);
+    // Source bounding box (keeps the sampled raster small on big photos).
+    const xs = [P.tl.x, P.tr.x, P.br.x, P.bl.x], ys = [P.tl.y, P.tr.y, P.br.y, P.bl.y];
+    const bx0 = clamp(Math.floor(Math.min.apply(null, xs)), 0, iw - 1);
+    const by0 = clamp(Math.floor(Math.min.apply(null, ys)), 0, ih - 1);
+    const bx1 = clamp(Math.ceil(Math.max.apply(null, xs)), 1, iw);
+    const by1 = clamp(Math.ceil(Math.max.apply(null, ys)), 1, ih);
+    const bw = Math.max(1, bx1 - bx0), bh = Math.max(1, by1 - by0);
+    const srcC = newCanvas(bw, bh);
+    srcC.getContext("2d").drawImage(bmp, bx0, by0, bw, bh, 0, 0, bw, bh);
+    const sd = srcC.getContext("2d").getImageData(0, 0, bw, bh).data;
+    const srcPts = [
+      { x: P.tl.x - bx0, y: P.tl.y - by0 }, { x: P.tr.x - bx0, y: P.tr.y - by0 },
+      { x: P.br.x - bx0, y: P.br.y - by0 }, { x: P.bl.x - bx0, y: P.bl.y - by0 }
+    ];
+    const dstPts = [{ x: 0, y: 0 }, { x: W, y: 0 }, { x: W, y: H }, { x: 0, y: H }];
+    const Hi = solveHomography(dstPts, srcPts); // maps output pixel -> source pixel
+    const out = newCanvas(W, H);
+    const octx = out.getContext("2d");
+    const oimg = octx.createImageData(W, H);
+    const od = oimg.data;
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const den = Hi[6] * x + Hi[7] * y + Hi[8];
+        const sx = (Hi[0] * x + Hi[1] * y + Hi[2]) / den;
+        const sy = (Hi[3] * x + Hi[4] * y + Hi[5]) / den;
+        const oi = (y * W + x) * 4;
+        if (sx < 0 || sy < 0 || sx > bw - 1 || sy > bh - 1) {
+          od[oi] = od[oi + 1] = od[oi + 2] = 255; od[oi + 3] = 255; continue;
+        }
+        const x0 = sx | 0, y0 = sy | 0;
+        const x1 = x0 + 1 < bw ? x0 + 1 : x0, y1 = y0 + 1 < bh ? y0 + 1 : y0;
+        const fx = sx - x0, fy = sy - y0;
+        for (let c = 0; c < 3; c++) {
+          const p00 = sd[(y0 * bw + x0) * 4 + c], p10 = sd[(y0 * bw + x1) * 4 + c];
+          const p01 = sd[(y1 * bw + x0) * 4 + c], p11 = sd[(y1 * bw + x1) * 4 + c];
+          const a = p00 + (p10 - p00) * fx, b2 = p01 + (p11 - p01) * fx;
+          od[oi + c] = a + (b2 - a) * fy;
+        }
+        od[oi + 3] = 255;
+      }
+    }
+    octx.putImageData(oimg, 0, 0);
+    return out;
+  }
+
+  // Best-effort quad auto-suggest inside the current rect region: downscale,
+  // grayscale, Otsu, largest bright (label-like) connected region, then its
+  // 4 extreme points (min/max of x+y and x-y). Returns corners as fractions
+  // of the whole image box, or null if degenerate (<20% of rect area) / fails.
+  function suggestQuad(bmp, rect) {
+    const cropC = cropFromBitmap(bmp, rect);
+    const { w: cw0, h: ch0 } = dims(cropC);
+    const scale = Math.min(1, 240 / Math.max(cw0, ch0));
+    const aw = Math.max(1, Math.round(cw0 * scale)), ah = Math.max(1, Math.round(ch0 * scale));
+    if (aw < 8 || ah < 8) return null;
+    const c = newCanvas(aw, ah);
+    c.getContext("2d").drawImage(cropC, 0, 0, aw, ah);
+    const d = c.getContext("2d").getImageData(0, 0, aw, ah).data;
+    const n = aw * ah;
+    const gray = new Uint8Array(n), hist = new Uint32Array(256);
+    for (let i = 0; i < n; i++) {
+      const y = (d[i * 4] * 0.299 + d[i * 4 + 1] * 0.587 + d[i * 4 + 2] * 0.114) | 0;
+      gray[i] = y; hist[y]++;
+    }
+    const t = otsuThreshold(hist, n);
+    const bright = new Uint8Array(n);
+    for (let i = 0; i < n; i++) bright[i] = gray[i] >= t ? 1 : 0;
+    const visited = new Uint8Array(n);
+    const stack = new Int32Array(n);
+    let bestComp = null, bestSize = 0;
+    for (let s = 0; s < n; s++) {
+      if (!bright[s] || visited[s]) continue;
+      let sp = 0; stack[sp++] = s; visited[s] = 1; const comp = [s];
+      while (sp > 0) {
+        const idx = stack[--sp];
+        const x = idx % aw, y = (idx / aw) | 0;
+        if (x > 0) { const m = idx - 1; if (bright[m] && !visited[m]) { visited[m] = 1; stack[sp++] = m; comp.push(m); } }
+        if (x < aw - 1) { const m = idx + 1; if (bright[m] && !visited[m]) { visited[m] = 1; stack[sp++] = m; comp.push(m); } }
+        if (y > 0) { const m = idx - aw; if (bright[m] && !visited[m]) { visited[m] = 1; stack[sp++] = m; comp.push(m); } }
+        if (y < ah - 1) { const m = idx + aw; if (bright[m] && !visited[m]) { visited[m] = 1; stack[sp++] = m; comp.push(m); } }
+      }
+      if (comp.length > bestSize) { bestSize = comp.length; bestComp = comp; }
+    }
+    if (!bestComp || bestSize < 16) return null;
+    let maxSum = -1e9, minSum = 1e9, maxDiff = -1e9, minDiff = 1e9;
+    let tl = null, br = null, tr = null, bl = null;
+    for (const idx of bestComp) {
+      const x = idx % aw, y = (idx / aw) | 0;
+      const sum = x + y, diff = x - y;
+      if (sum < minSum) { minSum = sum; tl = { x, y }; }
+      if (sum > maxSum) { maxSum = sum; br = { x, y }; }
+      if (diff > maxDiff) { maxDiff = diff; tr = { x, y }; }
+      if (diff < minDiff) { minDiff = diff; bl = { x, y }; }
+    }
+    const poly = [tl, tr, br, bl];
+    let A = 0;
+    for (let i = 0; i < 4; i++) { const a = poly[i], b = poly[(i + 1) % 4]; A += a.x * b.y - b.x * a.y; }
+    A = Math.abs(A) / 2;
+    if (A < 0.2 * aw * ah) return null;
+    const toFrac = (p) => ({ x: rect.x + (p.x / aw) * rect.w, y: rect.y + (p.y / ah) * rect.h });
+    return { tl: toFrac(tl), tr: toFrac(tr), br: toFrac(br), bl: toFrac(bl) };
+  }
+
+  // ---------------- Automatic deskew (±12°) ----------------
+  // Estimate the dominant text skew by maximizing the variance of the
+  // horizontal row-projection profile under rotation, at a capped analysis
+  // scale (~600px). Returns { angle, textIsDark }; `angle` is the correction
+  // rotation to apply (degrees, canvas convention). Falls back to angle 0.
+  function estimateSkew(src) {
+    const { w, h } = dims(src);
+    const scale = Math.min(1, 600 / Math.max(w, h));
+    const aw = Math.max(1, Math.round(w * scale)), ah = Math.max(1, Math.round(h * scale));
+    const c = newCanvas(aw, ah);
+    c.getContext("2d").drawImage(src, 0, 0, aw, ah);
+    const d = c.getContext("2d").getImageData(0, 0, aw, ah).data;
+    const n = aw * ah;
+    const gray = new Uint8Array(n), hist = new Uint32Array(256);
+    for (let i = 0; i < n; i++) {
+      const y = (d[i * 4] * 0.299 + d[i * 4 + 1] * 0.587 + d[i * 4 + 2] * 0.114) | 0;
+      gray[i] = y; hist[y]++;
+    }
+    const t = otsuThreshold(hist, n);
+    let dark = 0;
+    for (let i = 0; i < n; i++) if (gray[i] < t) dark++;
+    const textIsDark = dark <= n - dark;
+    // Collect ink pixel coords (subsample if very dense).
+    let xs = [], ys = [];
+    for (let y = 0; y < ah; y++) for (let x = 0; x < aw; x++) {
+      const isDark = gray[y * aw + x] < t;
+      if (textIsDark ? isDark : !isDark) { xs.push(x); ys.push(y); }
+    }
+    let m = xs.length;
+    if (m < 40) return { angle: 0, textIsDark };
+    const CAP = 40000;
+    if (m > CAP) {
+      const step = Math.ceil(m / CAP);
+      const nx = [], ny = [];
+      for (let i = 0; i < m; i += step) { nx.push(xs[i]); ny.push(ys[i]); }
+      xs = nx; ys = ny; m = xs.length;
+    }
+    const cx = aw / 2, cy = ah / 2;
+    const off = Math.ceil(aw * Math.sin(12 * Math.PI / 180)) + 2;
+    const rows = ah + 2 * off + 2;
+    function variance(angleDeg) {
+      const rad = angleDeg * Math.PI / 180, s = Math.sin(rad), co = Math.cos(rad);
+      const prof = new Float64Array(rows);
+      for (let i = 0; i < m; i++) {
+        const xr = xs[i] - cx, yr = ys[i] - cy;
+        const yy = (xr * s + yr * co) + cy + off;
+        const bin = yy | 0;
+        if (bin >= 0 && bin < rows) prof[bin]++;
+      }
+      let mean = 0;
+      for (let i = 0; i < rows; i++) mean += prof[i];
+      mean /= rows;
+      let v = 0;
+      for (let i = 0; i < rows; i++) { const dd = prof[i] - mean; v += dd * dd; }
+      return v / rows;
+    }
+    let best = -1, bestA = 0;
+    for (let a = -12; a <= 12; a += 1) { const v = variance(a); if (v > best) { best = v; bestA = a; } }
+    for (let a = bestA - 1; a <= bestA + 1 + 1e-9; a += 0.5) {
+      if (a < -12 || a > 12) continue;
+      const v = variance(a); if (v > best) { best = v; bestA = a; }
+    }
+    return { angle: bestA, textIsDark };
+  }
+
+  // Rotate a canvas/bitmap by `deg` (canvas convention), expanding bounds so
+  // nothing clips; fill background per polarity (white for dark text).
+  function rotateCanvas(src, deg, bg) {
+    const { w, h } = dims(src);
+    const rad = deg * Math.PI / 180;
+    const cos = Math.abs(Math.cos(rad)), sin = Math.abs(Math.sin(rad));
+    const nw = Math.ceil(w * cos + h * sin), nh = Math.ceil(w * sin + h * cos);
+    const c = newCanvas(nw, nh);
+    const ctx = c.getContext("2d");
+    ctx.fillStyle = bg || "#fff";
+    ctx.fillRect(0, 0, nw, nh);
+    ctx.translate(nw / 2, nh / 2);
+    ctx.rotate(rad);
+    ctx.drawImage(src, -w / 2, -h / 2);
+    return c;
+  }
+
+  // Estimate + apply deskew. Skips (returns src canvas) when |angle| < 1°.
+  function maybeDeskew(src) {
+    let est;
+    try { est = estimateSkew(src); }
+    catch (e) { console.debug("deskew estimate failed:", e); return toCanvas(src); }
+    const angle = est.angle;
+    console.debug("deskew: chosen correction angle (deg) =", angle.toFixed(2));
+    if (Math.abs(angle) < 1) return toCanvas(src);
+    return rotateCanvas(src, angle, est.textIsDark ? "#fff" : "#000");
+  }
+
   // Reasonably sized JPEG data URL for storage / preview.
   function toStorageDataUrl(src) {
     return drawScaled(src, 800).toDataURL("image/jpeg", 0.7);
@@ -1141,6 +1400,8 @@ details.acc .hint{ margin-top:0; }
       const progress = ref(0);
       const progStatus = ref("");
       const cropRect = ref({ x: 0.1, y: 0.35, w: 0.8, h: 0.3 });
+      const cropMode = ref("rect");         // 'rect' | 'quad' (台形補正)
+      const quadCorners = ref(null);        // {tl,tr,br,bl}, each {x,y} as image-box fractions
       const stageEl = ref(null);
       let currentBitmap = null;             // non-reactive
 
@@ -1172,6 +1433,7 @@ details.acc .hint{ margin-top:0; }
           currentBitmap = await loadBitmap(blob);
           previewUrl.value = toStorageDataUrl(currentBitmap);
           cropRect.value = { x: 0.1, y: 0.35, w: 0.8, h: 0.3 };
+          cropMode.value = "rect"; quadCorners.value = null;
           ocrText.value = ""; ocrRawText.value = ""; ocrFilteredText.value = "";
           ocrConf.value = null; engineUsed.value = "";
           stage.value = "crop";
@@ -1227,7 +1489,16 @@ details.acc .hint{ margin-top:0; }
         ocrConf.value = null; engineUsed.value = "";
         wordFilterOn.value = loadWordFilterPref();
         try {
-          const cropCanvas = useCrop ? cropFromBitmap(currentBitmap, cropRect.value) : null;
+          // Crop source: quad mode homography-warps to an upright rectangle
+          // (perspective already corrected); rect mode auto-deskews the crop.
+          let cropCanvas = null;
+          if (useCrop) {
+            if (cropMode.value === "quad" && quadCorners.value) {
+              cropCanvas = warpQuad(currentBitmap, quadCorners.value);
+            } else {
+              cropCanvas = maybeDeskew(cropFromBitmap(currentBitmap, cropRect.value));
+            }
+          }
           const usePaddle = (ocrMode.value === "eng" && useCrop);
 
           if (usePaddle) {
@@ -1248,7 +1519,7 @@ details.acc .hint{ margin-top:0; }
           // Tesseract path (full image, 日本語, or Paddle fallback)
           releasePaddle();
           const pre = useCrop ? preprocessCrop(cropCanvas)
-            : { canvas: preprocess(currentBitmap), singleLine: false };
+            : { canvas: preprocess(maybeDeskew(currentBitmap)), singleLine: false };
           progress.value = 0.1; progStatus.value = "OCRエンジンを準備中…";
           const worker = await getWorker(ocrMode.value, (m) => {
             progStatus.value = mapStatus(m.status);
@@ -1356,6 +1627,51 @@ details.acc .hint{ margin-top:0; }
         window.removeEventListener("pointermove", onCropMove);
         window.removeEventListener("pointerup", onCropUp);
         window.removeEventListener("pointercancel", onCropUp);
+      }
+
+      // ---- quad (台形補正) mode: default corners from the rect, auto-suggest ----
+      function rectToQuad(r) {
+        return {
+          tl: { x: r.x, y: r.y }, tr: { x: r.x + r.w, y: r.y },
+          br: { x: r.x + r.w, y: r.y + r.h }, bl: { x: r.x, y: r.y + r.h }
+        };
+      }
+      function setCropMode(mode) {
+        if (cropMode.value === mode) return;
+        cropMode.value = mode;
+        if (mode === "quad") {
+          let q = rectToQuad(cropRect.value);
+          try {
+            const suggested = currentBitmap && suggestQuad(currentBitmap, cropRect.value);
+            if (suggested) q = suggested;
+          } catch (e) { console.debug("quad auto-suggest failed:", e); }
+          quadCorners.value = q;
+        }
+      }
+      let quadDrag = null;
+      function onQuadDown(key, ev) {
+        if (!stageEl.value || !quadCorners.value) return;
+        ev.preventDefault(); ev.stopPropagation();
+        const rect = stageEl.value.getBoundingClientRect();
+        quadDrag = { key, rect, startX: ev.clientX, startY: ev.clientY, orig: Object.assign({}, quadCorners.value[key]) };
+        window.addEventListener("pointermove", onQuadMove);
+        window.addEventListener("pointerup", onQuadUp);
+        window.addEventListener("pointercancel", onQuadUp);
+      }
+      function onQuadMove(ev) {
+        if (!quadDrag) return;
+        const { key, rect, startX, startY, orig } = quadDrag;
+        const dx = rect.width ? (ev.clientX - startX) / rect.width : 0;
+        const dy = rect.height ? (ev.clientY - startY) / rect.height : 0;
+        const next = Object.assign({}, quadCorners.value);
+        next[key] = { x: clamp(orig.x + dx, 0, 1), y: clamp(orig.y + dy, 0, 1) };
+        quadCorners.value = next;
+      }
+      function onQuadUp() {
+        quadDrag = null;
+        window.removeEventListener("pointermove", onQuadMove);
+        window.removeEventListener("pointerup", onQuadUp);
+        window.removeEventListener("pointercancel", onQuadUp);
       }
 
       async function saveRecord() {
@@ -1495,26 +1811,54 @@ details.acc .hint{ margin-top:0; }
         ]);
       }
 
+      function quadOverlay() {
+        const q = quadCorners.value;
+        if (!q) return null;
+        const pts = [q.tl, q.tr, q.br, q.bl].map((p) => (p.x * 100) + "," + (p.y * 100)).join(" ");
+        const handle = (key) => h("div", {
+          class: "crop-handle qh qh-" + key, key: key,
+          style: { left: (q[key].x * 100) + "%", top: (q[key].y * 100) + "%" },
+          onPointerdown: (e) => onQuadDown(key, e)
+        });
+        return [
+          h("svg", { class: "quad-svg", viewBox: "0 0 100 100", preserveAspectRatio: "none" }, [
+            h("polygon", {
+              points: pts, fill: "rgba(76,141,255,0.14)", stroke: "#4c8dff",
+              "stroke-width": "2", "vector-effect": "non-scaling-stroke"
+            })
+          ]),
+          handle("tl"), handle("tr"), handle("br"), handle("bl")
+        ];
+      }
       function renderCrop() {
         const r = cropRect.value;
         const box = {
           left: (r.x * 100) + "%", top: (r.y * 100) + "%",
           width: (r.w * 100) + "%", height: (r.h * 100) + "%"
         };
+        const isQuad = cropMode.value === "quad";
         return h("div", {}, [
           captureErr.value ? h("div", { class: "err" }, captureErr.value) : null,
           h("div", { class: "card" }, [
             h("h2", { class: "sec" }, "読み取る範囲を選択"),
+            h("div", { class: "segctl" }, [
+              h("button", { class: isQuad ? "" : "on", onClick: () => setCropMode("rect") }, "矩形"),
+              h("button", { class: isQuad ? "on" : "", onClick: () => setCropMode("quad") }, "台形補正")
+            ]),
             h("div", { class: "crop-stage", ref: stageEl }, [
               h("img", { class: "crop-img", src: previewUrl.value, alt: "撮影した画像" }),
-              h("div", { class: "crop-overlay", style: box, onPointerdown: (e) => onCropDown("move", e) }, [
-                h("div", { class: "crop-handle nw", onPointerdown: (e) => onCropDown("nw", e) }),
-                h("div", { class: "crop-handle ne", onPointerdown: (e) => onCropDown("ne", e) }),
-                h("div", { class: "crop-handle sw", onPointerdown: (e) => onCropDown("sw", e) }),
-                h("div", { class: "crop-handle se", onPointerdown: (e) => onCropDown("se", e) })
-              ])
+              isQuad
+                ? quadOverlay()
+                : h("div", { class: "crop-overlay", style: box, onPointerdown: (e) => onCropDown("move", e) }, [
+                    h("div", { class: "crop-handle nw", onPointerdown: (e) => onCropDown("nw", e) }),
+                    h("div", { class: "crop-handle ne", onPointerdown: (e) => onCropDown("ne", e) }),
+                    h("div", { class: "crop-handle sw", onPointerdown: (e) => onCropDown("sw", e) }),
+                    h("div", { class: "crop-handle se", onPointerdown: (e) => onCropDown("se", e) })
+                  ])
             ]),
-            h("div", { class: "hint" }, "読み取りたい文字の周りを枠で囲みます。四隅をドラッグして調整できます。"),
+            h("div", { class: "hint" }, isQuad
+              ? "四隅のハンドルをラベルの角に合わせると、歪みを補正して読み取ります。"
+              : "読み取りたい文字の周りを枠で囲みます。四隅をドラッグして調整できます。"),
             h("div", { class: "btn-row", style: { marginTop: "12px" } }, [
               h("button", { class: "btn", onClick: () => runOcr(true) }, "この範囲を読み取る")
             ]),
@@ -1593,7 +1937,7 @@ details.acc .hint{ margin-top:0; }
             h("button", { class: "btn sec", onClick: pasteFromClipboard }, "クリップボードから貼り付け"),
             h("details", { class: "acc" }, [
               h("summary", {}, "撮影のコツ"),
-              h("div", { class: "hint" }, "型番・製造番号のシールを大きく、明るく撮影すると精度が上がります。撮影後に読み取る範囲を選べます。画像をコピーして Ctrl/Cmd+V でも貼り付けできます。")
+              h("div", { class: "hint" }, "型番・製造番号のシールを大きく、明るく撮影すると精度が上がります。撮影後に読み取る範囲を選べます。斜めから撮った場合は「台形補正」で四隅を合わせると歪みを補正できます（傾きは自動で補正されます）。画像をコピーして Ctrl/Cmd+V でも貼り付けできます。")
             ])
           ])
         ]);
