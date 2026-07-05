@@ -403,6 +403,39 @@ async function main() {
   if (!persisted) return fail("Record did not persist across reload (IndexedDB).");
   log("Step 5: record persisted across reload (IndexedDB).");
 
+  // ---- edit flow: 編集 -> textarea (pre-filled) -> 保存 -> list + persistence ----
+  await page.getByText("編集", { exact: true }).click();
+  await page.waitForSelector(".rec textarea", { timeout: 5000 });
+  const prefilledOk = await page.evaluate(() => {
+    const ta = document.querySelector(".rec textarea");
+    return !!ta && /KX/i.test(ta.value) && /98765/.test(ta.value);
+  });
+  if (!prefilledOk) return fail("Edit textarea was not pre-filled with the record's existing text.");
+  // While editing, the other per-record actions must not be tappable.
+  const otherActionsHidden = await page.evaluate(() =>
+    !document.querySelector(".rec .acts"));
+  if (!otherActionsHidden) return fail("コピー/再読み取り/削除 were still present while a record was in edit mode.");
+  await page.evaluate(() => {
+    const ta = document.querySelector(".rec textarea");
+    ta.value = ta.value + " EDITED-999";
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await page.getByText("保存", { exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector(".rec textarea"), { timeout: 5000 });
+  const editShowsInList = await page.evaluate(() =>
+    [...document.querySelectorAll(".rec .txt")].some((e) => /EDITED-999/.test(e.textContent)));
+  if (!editShowsInList) return fail("Edited text was not reflected in the list after saving.");
+  log("Step 5a: 編集 -> textarea (pre-filled) -> 保存 updated the list text; other actions were hidden while editing.");
+
+  await page.reload({ waitUntil: "load" });
+  await page.waitForSelector("header h1", { timeout: 10000 });
+  await page.getByText("一覧", { exact: true }).click();
+  await page.waitForSelector(".rec .txt", { timeout: 8000 });
+  const editPersisted = await page.evaluate(() =>
+    [...document.querySelectorAll(".rec .txt")].some((e) => /EDITED-999/.test(e.textContent)));
+  if (!editPersisted) return fail("Edited record text did not persist across reload (IndexedDB).");
+  log("Step 5b: edited text persisted across reload (IndexedDB).");
+
   // ---- lightbox on saved thumbnail ----
   await page.click(".rec .thumb");
   await page.waitForSelector(".lightbox img", { timeout: 5000 });
@@ -413,7 +446,7 @@ async function main() {
   if (!lbSrcOk) return fail("Lightbox image did not show the saved data URL.");
   await page.click(".lightbox");
   await page.waitForFunction(() => !document.querySelector(".lightbox"), { timeout: 5000 });
-  log("Step 5b: thumbnail tap opened the lightbox; tap closed it.");
+  log("Step 5c: thumbnail tap opened the lightbox; tap closed it.");
 
   // ---- re-OCR from a saved record ----
   await page.getByText("再読み取り", { exact: true }).click();
@@ -424,7 +457,7 @@ async function main() {
   await expandCropToFull();
   await page.getByText("この範囲を読み取る", { exact: true }).click();
   await assertResult("Re-OCR-from-saved", "KX[-—_ ]?1234AB", "98765");
-  log("Step 5c: 再読み取り re-ran OCR from the saved image (crop stage + text matched).");
+  log("Step 5d: 再読み取り re-ran OCR from the saved image (crop stage + text matched).");
   await page.getByText("破棄", { exact: true }).click();
 
   // ---- Japanese OCR mode ----

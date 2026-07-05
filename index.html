@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-Mu3A+F10UUzgYPCI/KdInEWKRvwR1YZgEHAU/MdRFuw=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-TklD+Fza0u2ow+wSfyw4afKuvChezEKsz1KCWC6lRJ0='; img-src 'self' blob: data:; connect-src https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-lfuCwARYSv07n2YHBkK8n5Sw1GnYLkM/DXTmZNdHh8Y=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-k0J0lLAcFf1htWs+ZEx1f9qRppSOyv8/XjrCHIQT9+c='; img-src 'self' blob: data:; connect-src https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
 <title>ラベルOCR</title>
 <style>
 :root{
@@ -105,10 +105,21 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
 .rec .time{ font-size:12px; color:var(--muted); }
 .rec .txt{ white-space:pre-wrap; word-break:break-word; font-family:ui-monospace,Menlo,monospace;
   font-size:14px; margin:4px 0 8px; }
-.rec .acts{ display:flex; gap:8px; }
-.rec .acts button{ flex:1; min-height:40px; border-radius:9px; border:1px solid var(--line);
+/* Action buttons: two rows (primary: コピー/再読み取り, secondary: 編集/削除)
+   instead of 4-across so each target stays >=44px tall with >=8px gaps even
+   at 375px width. 削除 gets a tinted danger background (not just a border) so
+   it reads as visually distinct from the neutral row above it. */
+.rec .acts{ display:flex; flex-direction:column; gap:8px; }
+.rec .acts .actrow{ display:flex; gap:8px; }
+.rec .acts button{ flex:1; min-height:44px; border-radius:10px; border:1px solid var(--line);
   background:var(--panel2); color:var(--fg); font-size:14px; font-weight:600; }
-.rec .acts button.del{ color:var(--danger); border-color:var(--danger); }
+.rec .acts button.del{ background:rgba(255,90,95,.14); color:var(--danger); border-color:var(--danger); }
+.rec textarea{ min-height:88px; font-size:14px; margin:4px 0 0; }
+.rec .editrow{ display:flex; gap:8px; margin-top:8px; }
+.rec .editrow button{ flex:1; min-height:44px; border-radius:10px; border:none;
+  font-size:14px; font-weight:700; }
+.rec .editrow button.save{ background:var(--ok); color:#fff; }
+.rec .editrow button.cancel{ background:var(--panel2); color:var(--fg); border:1px solid var(--line); }
 .empty-note{ text-align:center; color:var(--muted); padding:30px 10px; }
 .spinner{ width:20px; height:20px; border:3px solid rgba(255,255,255,.4);
   border-top-color:#fff; border-radius:50%; animation:spin .8s linear infinite; }
@@ -1355,6 +1366,33 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
         showToast(ok ? "コピーしました" : "コピーに失敗しました");
       }
 
+      // ---- inline record text editing ----
+      // Only one record can be in edit mode at a time: editingId is a single
+      // ref, so opening 編集 on another record just overwrites it (and
+      // editText with it), discarding whatever was unsaved in the previous one.
+      const editingId = ref(null);
+      const editText = ref("");
+      function startEdit(rec) {
+        editingId.value = rec.id;
+        editText.value = rec.text || "";
+      }
+      function cancelEdit() {
+        editingId.value = null;
+        editText.value = "";
+      }
+      async function saveEdit(rec) {
+        try {
+          // Same id -- do not touch createdAt/dateKey, only the text changes.
+          await dbPut(Object.assign({}, rec, { text: editText.value }));
+          await refreshRecords();
+          editingId.value = null;
+          editText.value = "";
+          showToast("更新しました");
+        } catch (e) {
+          listErr.value = "更新に失敗しました: " + (e && e.message ? e.message : e);
+        }
+      }
+
       // ---- lightbox & re-OCR from a saved record ----
       const lightboxUrl = ref("");
 
@@ -1474,12 +1512,16 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
               onInput: (e) => { ocrText.value = e.target.value; },
               spellcheck: "false"
             }),
-            h("div", { class: "btn-row", style: { marginTop: "12px" } }, [
-              h("button", { class: "btn ok", onClick: saveRecord }, "保存する"),
-              h("button", { class: "btn sec", onClick: discard }, "破棄")
+            // 保存する stands alone as the single, full-width primary action.
+            // 破棄/範囲を選び直す are a secondary pair on their own row below --
+            // deliberately not beside 保存する, so a mis-tap can't hit save
+            // when the user meant to discard (or vice versa).
+            h("div", { class: "btn-row", style: { marginTop: "14px" } }, [
+              h("button", { class: "btn ok", onClick: saveRecord }, "保存する")
             ]),
             h("div", { class: "btn-row", style: { marginTop: "10px" } }, [
-              h("button", { class: "btn sec", onClick: backToCrop }, "範囲を選び直す")
+              h("button", { class: "btn sec", onClick: backToCrop }, "範囲を選び直す"),
+              h("button", { class: "btn sec", onClick: discard }, "破棄")
             ])
           ])
         ]);
@@ -1524,6 +1566,35 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
       }
 
       function renderRecord(rec) {
+        const isEditing = editingId.value === rec.id;
+        // In edit mode the other actions (コピー/再読み取り/削除) are not
+        // rendered at all -- simplest way to guarantee no mis-taps while a
+        // save/cancel decision is pending on this card.
+        const bodyRest = isEditing
+          ? [
+              h("textarea", {
+                value: editText.value,
+                onInput: (e) => { editText.value = e.target.value; },
+                spellcheck: "false"
+              }),
+              h("div", { class: "editrow" }, [
+                h("button", { class: "save", onClick: () => saveEdit(rec) }, "保存"),
+                h("button", { class: "cancel", onClick: cancelEdit }, "キャンセル")
+              ])
+            ]
+          : [
+              h("div", { class: "txt" }, rec.text || "(テキストなし)"),
+              h("div", { class: "acts" }, [
+                h("div", { class: "actrow" }, [
+                  h("button", { onClick: () => copyRecord(rec) }, "コピー"),
+                  h("button", { onClick: () => reOcrRecord(rec) }, "再読み取り")
+                ]),
+                h("div", { class: "actrow" }, [
+                  h("button", { onClick: () => startEdit(rec) }, "編集"),
+                  h("button", { class: "del", onClick: () => deleteRecord(rec) }, "削除")
+                ])
+              ])
+            ];
         return h("div", { class: "rec", key: rec.id }, [
           h("img", {
             class: "thumb", src: rec.imageDataUrl, alt: "保存した画像(タップで拡大)",
@@ -1531,12 +1602,7 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
           }),
           h("div", { class: "body" }, [
             h("div", { class: "time" }, timeLabel(rec.createdAt)),
-            h("div", { class: "txt" }, rec.text || "(テキストなし)"),
-            h("div", { class: "acts" }, [
-              h("button", { onClick: () => copyRecord(rec) }, "コピー"),
-              h("button", { onClick: () => reOcrRecord(rec) }, "再読み取り"),
-              h("button", { class: "del", onClick: () => deleteRecord(rec) }, "削除")
-            ])
+            ...bodyRest
           ])
         ]);
       }
