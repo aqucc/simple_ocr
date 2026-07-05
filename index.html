@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-lfuCwARYSv07n2YHBkK8n5Sw1GnYLkM/DXTmZNdHh8Y=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-k0J0lLAcFf1htWs+ZEx1f9qRppSOyv8/XjrCHIQT9+c='; img-src 'self' blob: data:; connect-src https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-KgL8CM2IRcylUPkfds8K44fMLiChTN2WB0+FoqW8uOA=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-k0J0lLAcFf1htWs+ZEx1f9qRppSOyv8/XjrCHIQT9+c='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
 <title>ラベルOCR</title>
 <style>
 :root{
@@ -148,20 +148,23 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
     workerPath: "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/worker.min.js",
     corePath: "https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1"
   };
-  // Each @tesseract.js-data/* language is a separate npm package on jsdelivr,
-  // so langPath (and therefore the Tesseract "lang" string) differs per mode.
-  // jpn.traineddata also recognizes ASCII/alphanumerics, so 'jpn' alone covers
-  // mixed Japanese+model-number labels without needing a combined 'jpn+eng'
-  // langPath (which would require both files under one base URL — they aren't).
+  // Traineddata is SELF-HOSTED under a same-origin tessdata/ directory
+  // (eng.traineddata.gz + jpn.traineddata.gz committed in the repo), NOT
+  // pulled from the two separate @tesseract.js-data/* npm packages on
+  // jsdelivr. Self-hosting is what lets the 日本語 worker load a COMBINED
+  // "jpn+eng" model from a single langPath: jpn.traineddata alone is weak on
+  // half-width ASCII digits embedded in kanji text (an address like
+  // 東京都千代田区1-2-3 loses/garbles the 1-2-3), and jpn+eng is the
+  // established remedy. Both languages are served from the same base URL, so
+  // Tesseract can resolve both files. The langPath is resolved RELATIVE to the
+  // document (new URL below), so it works when the app is served from a
+  // subpath (GitHub Pages: /simple_ocr/tessdata) and not only from the root.
+  // Note: over file:// this fetch fails (no origin) — HTTP(S) serving required
+  // for OCR, same as the other CDN assets.
+  const TESSDATA_PATH = new URL("tessdata", document.baseURI).href.replace(/\/$/, "");
   const TESS_LANGS = {
-    eng: {
-      lang: "eng",
-      langPath: "https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int"
-    },
-    jpn: {
-      lang: "jpn",
-      langPath: "https://cdn.jsdelivr.net/npm/@tesseract.js-data/jpn@1.0.0/4.0.0_best_int"
-    }
+    eng: { lang: "eng", langPath: TESSDATA_PATH },
+    jpn: { lang: "jpn+eng", langPath: TESSDATA_PATH }
   };
   const LANG_MODE_KEY = "label_ocr_lang_mode";
 
@@ -260,6 +263,21 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
   function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
   function newCanvas(w, h) { const c = document.createElement("canvas"); c.width = w; c.height = h; return c; }
   function cleanText(t) { return (t || "").replace(/\n{3,}/g, "\n\n").trim(); }
+
+  // Full-width -> half-width ASCII normalization for 日本語 mode output. The
+  // user stores model numbers and addresses, so full-width digits/letters that
+  // the jpn LSTM sometimes emits (０-９Ａ-Ｚａ-ｚ, full-width hyphen －, ideographic
+  // space) are folded to their ASCII equivalents; various Unicode dash/minus
+  // glyphs are folded to "-" so an address like 東京都千代田区1-2-3 or a code
+  // like KX-1234 reads back in plain ASCII. The katakana chōonpu ー (U+30FC) is
+  // deliberately NOT in any of these ranges, so real kana is left intact.
+  function normalizeWidth(t) {
+    if (!t) return t;
+    return t
+      .replace(/[！-～]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+      .replace(/　/g, " ")
+      .replace(/[‐-―−⁃﹘﹣]/g, "-");
+  }
 
   // Rebuild recognized text keeping only words with confidence >= 35,
   // preserving line breaks (tesseract.js v5: data.lines[].words[].confidence,
@@ -1234,6 +1252,11 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
           params.tessedit_char_whitelist = ocrMode.value === "eng"
             ? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-./:()#"
             : "";
+          // jpn (jpn+eng): keep the spaces the engine finds between words so a
+          // half-width digit run embedded between kanji (東京都千代田区 1-2-3)
+          // isn't glued to the surrounding CJK, and so the word filter can see
+          // the digit token as its own token.
+          if (ocrMode.value === "jpn") params.preserve_interword_spaces = "1";
           await worker.setParameters(params);
           progStatus.value = "認識中…";
           const { data } = await worker.recognize(pre.canvas);
@@ -1242,7 +1265,11 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
           const filteredConf = filterLowConfWords(data);
           // Never make results strictly worse: fall back to the raw text if
           // filtering by word confidence removed everything (or couldn't run).
-          const cleanedResult = cleanText(filteredConf && filteredConf.trim() ? filteredConf : rawText);
+          let cleanedResult = cleanText(filteredConf && filteredConf.trim() ? filteredConf : rawText);
+          // Fold full-width ASCII/digits/dashes to half-width in jpn mode
+          // (before the word filter) so stored addresses / model numbers read
+          // back in plain ASCII and digit tokens match the filter's rules.
+          if (ocrMode.value === "jpn") cleanedResult = normalizeWidth(cleanedResult);
           ocrConf.value = data && typeof data.confidence === "number" ? Math.round(data.confidence) : null;
           await applyWordFilterAndFinish(cleanedResult);
           stage.value = "result";
@@ -1544,7 +1571,7 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
             ]),
             ocrMode.value === "eng"
               ? h("div", { class: "hint" }, "英数字モードは、範囲を選んで読み取ると高精度エンジン PaddleOCR (PP-OCRv4) を使用します。初回の範囲読み取り時のみ、モデルとエンジン（合計 約22MB）をダウンロードします。「全体を読み取る」は Tesseract で処理します。")
-              : h("div", { class: "hint" }, "日本語モードは Tesseract を使用し、初回のみ言語データ（約2.0MB）をダウンロードするため、少し時間がかかります。")
+              : h("div", { class: "hint" }, "日本語モードは Tesseract（jpn+eng の複合モデル）を使用します。和文中の半角英数字（住所の 1-2-3 や型番）の精度を上げるため日本語と英数字の学習データを併用し、初回のみ言語データ（約5MB）をダウンロードするため、少し時間がかかります。")
           ]),
           h("div", { class: "card" }, [
             h("h2", { class: "sec" }, "ラベルを撮影・選択"),

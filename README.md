@@ -18,7 +18,7 @@
   | --- | --- |
   | 英数字(型番向け) × 範囲指定 | **PaddleOCR PP-OCRv4**（認識モデル直当て・高精度、失敗時は Tesseract に自動フォールバック） |
   | 英数字(型番向け) × 全体 | Tesseract `eng` |
-  | 日本語+英数字（範囲指定/全体） | Tesseract `jpn` |
+  | 日本語+英数字（範囲指定/全体） | Tesseract `jpn+eng`（自己ホストの複合モデル） |
 
   PaddleOCR 経路は「人間の範囲指定＝文字検出」とみなし、検出モデル（DBNet）を省いて**認識モデルのみ**を実行します。範囲内が複数行の場合は水平射影プロファイルで行分割して1行ずつ認識します。PP-OCRv4 の辞書は中国語+ASCII のため英数字の型番に適しています。
   - **単語レベルの自動分割**: 各行をさらに列方向のインク・プロファイル（グレースケール＋大津の二値化）で走査し、単語間の空白（ギャップ長 ≥ その行の高さの45%、かつ最低3px）を検出して**単語ごとに個別の枠を描いたのと同じ効果**を得ます（文字間のカーニングはこのしきい値を超えないため分割されません）。各単語は自身のインク行に応じて上下も詰め直し（余白15%を残してクランプ）、48px高さへの正規化後に文字がより大きく写るようにしてから個別に認識・信頼度判定（**スコア0.5未満または英数字ストリップ後に空の単語は破棄**、行内の他の単語は生かす）を行い、生き残った単語を空白1つで連結します。行が元々1ブロックしかない場合や、分割数が多すぎる場合（24個超、バーコードや模様の可能性が高い）は、この分割を行わず従来どおり行全体を一括認識します。これにより (a) このモデルが単語間スペースを安定して出力しないケース（例:「MADE IN JAPAN」が「MADEINJAPAN」に潰れる）を回避し、(b) バーコードの縞模様に隣接する型番/シリアル等の数字だけを個別に救出できます（下記）。
@@ -28,7 +28,9 @@
 - **単語フィルタ（ハイブリッド・トークン分類器によるノイズ除去）**: 信頼度による足切りをすり抜けるノイズもあります。認証マーク・ロゴ（PSE、丸囲みのR ®、角囲みの検印など）の中の文字が、孤立した記号・単独のCJK文字・意味のない短いトークンとして誤認識されるケースです。詳細は下記「単語フィルタの設計」を参照。**例外（EANバーコードの先頭1桁）**: 単独の英数字トークンは通常2文字未満だと破棄されますが、その行に数字が合計6桁以上含まれる場合に限り、単独の数字1文字トークンは破棄されません（例:「4 901234 567894」の先頭の「4」）。EAN/UPCバーコードの慣習的な印字（先頭1桁＋6桁×2グループ）を想定した狭い例外で、それ以外では2文字以上ルールを緩めません。結果画面のテキストエリア上部に「単語フィルタ」トグル（既定 ON、`localStorage` に記憶）があり、タップでフィルタ後/フィルタ前（生の認識結果）を切り替えられます。フィルタで全行が消えてしまった場合は自動的に生テキストへフォールバックし、トグルは OFF 表示になります（結果が悪化しないため）。**注意**: トグルはテキストエリアの内容を丸ごと置き換えます。手動編集後にトグルを押すと編集内容は失われます（シンプルさを優先した仕様）。
 - **認識モード（撮影画面・撮影ボタンの上）**: 2つのセグメントボタンから選択でき、選択は `localStorage` に保存され次回起動時も復元されます。
   - 「英数字(型番向け)」（既定）: 範囲指定で PaddleOCR、初回のみエンジン+モデル（合計約22MB: ONNX Runtime WASM 約11.0MB + 認識モデル約10.8MB）をダウンロードします。
-  - 「日本語+英数字」: Tesseract 言語 `jpn`。`jpn` の学習データは英数字も認識できるため、和文と型番が混在するラベルにはこちらを使用します（`eng` と `jpn` は別々の npm パッケージとして配布されており、1つの `langPath` から両方を取得できないため `jpn+eng` ではなく `jpn` 単体を使用）。初回切替時は日本語の学習データ（gzip 約2.0MB）を追加ダウンロードするため時間がかかる旨のヒントを表示します。
+  - 「日本語+英数字」: Tesseract 言語 `jpn+eng`（**自己ホストの複合モデル**）。`jpn` 単体の学習データは**和文中に埋め込まれた半角ASCII数字に弱く**、漢字の住所（例: 東京都千代田区1-2-3）に含まれる `1-2-3` が丸ごと無視される・化けることがありました。`jpn+eng` の複合指定はこの「和文＋埋め込みASCII数字」に対する定番の対策です。`eng` と `jpn` は別々の npm パッケージのため 1 つの CDN URL からは両方を取得できませんが、**リポジトリ内の `tessdata/` に両ファイル（`eng.traineddata.gz` + `jpn.traineddata.gz`）を同梱して同一オリジンから配信**することで、1 つの `langPath` から `jpn+eng` を読み込めるようにしています（`langPath` は `new URL("tessdata", document.baseURI)` で**ドキュメント相対**に解決するため、GitHub Pages のサブパス配信 `/simple_ocr/tessdata` でも動作します）。初回切替時は学習データ（gzip 合計約5MB）をダウンロードするため時間がかかる旨のヒントを表示します。
+  - **全角→半角の正規化（日本語モード）**: 保存対象が型番・住所であるため、日本語モードの認識結果は**単語フィルタの前に**全角ASCII（０-９Ａ-Ｚａ-ｚ）・全角ハイフン `－`・各種ダッシュ／マイナス記号・全角スペースを半角へ折り畳みます（カタカナ長音符 `ー`（U+30FC）はいずれの範囲にも含めず保持）。これにより住所の `1-2-3` や `KX-1234` が素の ASCII で保存され、数字トークンが単語フィルタの型番ルールに合致します。
+  - **注意（`file://` 直開き）**: 自己ホスト traineddata は `fetch` で取得するため、`file://` で開くと（オリジンが無く）取得に失敗します。日本語モードの OCR には HTTP(S) 配信が必要です（他の CDN 資産と同じ制約）。
 - **OCR（進捗表示）**: 進捗バーとステータス（例: 認識中…）を表示。Tesseract ワーカーは常に**最大1つだけ**保持し、モード切替後に次の OCR を実行するタイミングで前のワーカーを `terminate()` してから新しいワーカーを作成します（iPhone のメモリ対策）。PaddleOCR 実行時は Tesseract ワーカーを解放し、逆も同様です。ONNX Runtime は**シングルスレッド**設定（GitHub Pages は COOP/COEP ヘッダを送らないため `SharedArrayBuffer` が使えない）で、SIMD 有効・プロキシワーカー無効です。結果画面には使用エンジン名を表示します。
 - **結果画面**: 撮影画像プレビュー、認識テキストの編集用 `<textarea>`、信頼度表示、「保存する」/「破棄」。
 - **保存（IndexedDB / ライブラリなし）**: `{ id, createdAt(ISO), dateKey(YYYY-MM-DD ローカル), text, imageDataUrl(最長800pxのJPEG, 画質0.7) }`
@@ -42,7 +44,7 @@
   - `python3 -m http.server 8000` の後、`http://localhost:8000/index.html`
   - `node tools/verify.mjs` は検証用の簡易サーバーも起動します（検証専用）。
 - **カメラ撮影・画像選択**だけなら `file://` で直接 `index.html` を開いても動作します（ただし CDN 取得のためオンラインが必要）。
-- 依存（Vue / Tesseract.js / traineddata）は **cdn.jsdelivr.net から都度ダウンロード**します。初回 OCR 時に言語データ等（数MB）を取得するため、初回は時間がかかります（ブラウザにキャッシュされます）。
+- 依存（Vue / Tesseract.js 本体等）は **cdn.jsdelivr.net から都度ダウンロード**します。Tesseract の学習データ（`jpn+eng`）は**リポジトリ同梱の `tessdata/` を同一オリジンから配信**します。いずれも初回 OCR 時に数MBを取得するため、初回は時間がかかります（ブラウザにキャッシュされます）。
 
 ### iPhone（SE3 / Safari）での注意
 
@@ -62,7 +64,7 @@ default-src 'none';
 script-src 'sha256-…(inline script)…' https://cdn.jsdelivr.net 'wasm-unsafe-eval';
 style-src 'sha256-…(inline style)…';
 img-src 'self' blob: data:;
-connect-src https://cdn.jsdelivr.net data:;
+connect-src 'self' https://cdn.jsdelivr.net data:;
 worker-src blob:;
 base-uri 'none';
 form-action 'none'
@@ -70,7 +72,7 @@ form-action 'none'
 
 - `script-src`: インラインscript（ハッシュ）、Vue/Tesseract 本体、Worker からの `importScripts`（jsdelivr）、WASM 実行（`wasm-unsafe-eval`）。
 - `worker-src blob:`: Tesseract.js は Worker を Blob URL で起動します。
-- `connect-src`: traineddata / ONNX Runtime の `.wasm` / PP-OCRv4 モデル・辞書の取得（すべて jsdelivr）と、Tesseract 埋め込み WASM の `data:` URI 取得。単語フィルタの英単語リスト（`word-list` の `words.txt`、同じく jsdelivr）もこの `connect-src` の範囲内で追加の CSP 変更なしに取得できます（`tools/verify.mjs` で CSP 違反ゼロを確認済み）。
+- `connect-src`: `'self'` は**自己ホストの Tesseract 学習データ**（同一オリジンの `tessdata/*.traineddata.gz`。Tesseract の Worker が `fetch` で取得）のために追加しました。`https://cdn.jsdelivr.net` は ONNX Runtime の `.wasm` / PP-OCRv4 モデル・辞書、単語フィルタの英単語リスト（`word-list` の `words.txt`）の取得に、`data:` は Tesseract 埋め込み WASM の `data:` URI 取得に使います（`tools/verify.mjs` で CSP 違反ゼロ、かつ日本語モードで traineddata が jsdelivr から取得されない＝自己ホストのみを確認済み）。
 - onnxruntime-web は遅延ロード（`<script>` 挿入）+ 内部の動的 `import()` も jsdelivr のため `script-src https://cdn.jsdelivr.net` の範囲内。追加の CSP 緩和は不要でした。
 - `img-src`: 保存画像・プレビュー（`data:` / `blob:`）。
 
@@ -136,7 +138,7 @@ Playwright + Chromium（プリインストール）で以下を確認します:
 
 ## 固定した依存（バージョン）
 
-すべて `cdn.jsdelivr.net`（npm ミラー）から取得。各 URL は npm レジストリで実在を確認済み。
+Tesseract の学習データ（`tessdata/*.traineddata.gz`）は**リポジトリに同梱して同一オリジンから配信**します（`jpn+eng` 複合モデルを 1 つの `langPath` から読み込むため）。それ以外は `cdn.jsdelivr.net`（npm ミラー）から取得。各 URL・各ファイルの出所は npm レジストリで実在を確認済み。
 
 | 依存 | バージョン | URL |
 | --- | --- | --- |
@@ -144,8 +146,8 @@ Playwright + Chromium（プリインストール）で以下を確認します:
 | Tesseract.js（本体） | 5.1.1 | `https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js` |
 | Tesseract.js worker | 5.1.1 | `https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/worker.min.js` |
 | tesseract.js-core（WASM, corePath） | 5.1.1 | `https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1`（SIMD+LSTM 版 `tesseract-core-simd-lstm.wasm.js` を自動選択） |
-| eng 学習データ（langPath） | 1.0.0 | `https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int`（`eng.traineddata.gz`、gzip 約2.95MB） |
-| jpn 学習データ（langPath） | 1.0.0 | `https://cdn.jsdelivr.net/npm/@tesseract.js-data/jpn@1.0.0/4.0.0_best_int`（`jpn.traineddata.gz`、gzip 約2.0MB＝2,030,256 bytes。npm tarball から実測） |
+| eng 学習データ（langPath、**自己ホスト**） | 1.0.0 | リポジトリ内 `tessdata/eng.traineddata.gz`（元は `@tesseract.js-data/eng@1.0.0/4.0.0_best_int`、gzip 約2.95MB＝2,952,873 bytes） |
+| jpn 学習データ（langPath、**自己ホスト**） | 1.0.0 | リポジトリ内 `tessdata/jpn.traineddata.gz`（元は `@tesseract.js-data/jpn@1.0.0/4.0.0_best_int`、gzip 約2.0MB＝2,030,256 bytes） |
 | onnxruntime-web（WASM 実行、遅延ロード） | 1.19.2 | `https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.wasm.min.js`（`wasmPaths` も同 dist。`ort-wasm-simd-threaded.wasm` 約11.0MB） |
 | PP-OCRv4 認識モデル + 辞書 | @gutenye/ocr-models 1.4.2 | `https://cdn.jsdelivr.net/npm/@gutenye/ocr-models@1.4.2/assets/ch_PP-OCRv4_rec_infer.onnx`（約10.8MB）/ `assets/ppocr_keys_v1.txt` |
 | word-list（単語フィルタの英単語辞書、遅延ロード） | 4.1.0 | `https://cdn.jsdelivr.net/npm/word-list@4.1.0/words.txt`（274,136語、生 約2.68MB / gzip 約697KB、npm tarball から実測） |
@@ -155,8 +157,8 @@ Playwright + Chromium（プリインストール）で以下を確認します:
 
 ## 既知の制限（PoC）
 
-- **オンライン必須**: 依存を CDN から取得します（PaddleOCR 経路は初回約22MB、Tesseract 経路は数MB。いずれも同梱しない方針）。オフライン化するには自前ホスティングが必要です。
-- **PaddleOCR は英数字系の範囲指定時のみ**。日本語の PP-OCR 認識モデル（ONNX 変換済み）は npm/jsdelivr 上で信頼できる配布が確認できなかったため、日本語モードは Tesseract `jpn` のままです。`jpn` は活字・組版向け訓練のため、**装飾的・小さい・低コントラストな和文印字の精度は限定的**です（範囲指定＋二値化前処理である程度改善）。
+- **オンライン必須**: PaddleOCR 経路（初回約22MB）や Vue/Tesseract 本体・WASM は CDN から取得します。Tesseract 学習データ（`jpn+eng` で合計約5MB）はリポジトリ同梱の同一オリジン配信ですが、いずれもネットワーク越しの取得（初回はブラウザにキャッシュ）で、`file://` 直開きでは学習データの `fetch` が失敗します。完全オフライン化には他の CDN 資産も自前ホスティングが必要です。
+- **PaddleOCR は英数字系の範囲指定時のみ**。日本語の PP-OCR 認識モデル（ONNX 変換済み）は npm/jsdelivr 上で信頼できる配布が確認できなかったため、日本語モードは Tesseract（`jpn+eng` 複合モデル）です。`jpn` 単体は和文中の埋め込み半角ASCII数字（住所の `1-2-3` や型番）に弱く、`jpn+eng` の複合指定＋全角→半角正規化でこれを補います。ただし Tesseract は活字・組版向け訓練のため、**装飾的・小さい・低コントラストな和文印字の精度は依然として限定的**です（範囲指定＋二値化前処理である程度改善）。
 - PaddleOCR の辞書は中国語+ASCII のため、まれに漢字ノイズが混じることがあります（結果はテキストボックスで編集可能）。傾き補正・歪み補正は未実装で、大きく斜めのラベルでは精度が落ちます。範囲指定で読みたい行だけを囲むのが最も効果的です。
 - **保存容量**: 画像は最長800px/JPEG 0.7 に縮小して保存しますが、IndexedDB の容量はブラウザ依存。多数保存すると上限に達する可能性があります。エクスポート機能はありません。
 - **クリップボード読み取り**は secure context（HTTPS/localhost）とユーザー許可が必要で、対応状況はブラウザ依存。

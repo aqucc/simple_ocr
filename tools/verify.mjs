@@ -169,10 +169,15 @@ async function main() {
   const errors = [];
   const cspViolations = [];
   const unmappedCdn = [];
+  // traineddata is now SELF-HOSTED (served from the local origin under
+  // /tessdata), so the app must NEVER reach for a *.traineddata* file on
+  // jsdelivr in any mode. Track any that slip through and assert none.
+  const jsdelivrTraineddata = [];
 
   // Intercept jsdelivr; fulfill from the local cache.
   await context.route("https://cdn.jsdelivr.net/**", async (route) => {
     const url = new URL(route.request().url());
+    if (/traineddata/i.test(url.pathname)) jsdelivrTraineddata.push(url.pathname);
     const name = basename(url.pathname);
     const local = CACHE_FILES[name];
     if (local && existsSync(local)) {
@@ -537,6 +542,91 @@ async function main() {
   if (cspViolations.length) return fail("CSP violation(s) occurred during Japanese-mode OCR.");
   const cspFromPage2 = await page.evaluate(() => window.__csp || []);
   if (cspFromPage2.length) { cspViolations.push(...cspFromPage2); return fail("securitypolicyviolation events fired during Japanese-mode OCR."); }
+
+  // Self-hosted traineddata gate: after a full jpn-mode OCR (which loads the
+  // jpn+eng combined model) the app must not have fetched any *.traineddata*
+  // from jsdelivr — the model comes from the same-origin /tessdata dir.
+  if (jsdelivrTraineddata.length) {
+    return fail("jpn mode fetched traineddata from jsdelivr (should be self-hosted /tessdata):\n  " + jsdelivrTraineddata.join("\n  "));
+  }
+  log("Step 9a: no jsdelivr traineddata fetches — jpn+eng model loaded from self-hosted /tessdata.");
+
+  // ---- ACCEPTANCE GATE: embedded half-width digits in Japanese text ----
+  // The user problem: kanji text with embedded half-width digits (an address
+  // like 東京都千代田区1-2-3, or unit specs like 定格 100V 50Hz 1.5A) used to
+  // lose or garble the digits under a jpn-only model. jpn+eng (self-hosted)
+  // plus full-width normalization must recover them. Only meaningful with a
+  // CJK-capable font; skipped (with a note) otherwise.
+  if (cjkFamily) {
+    // The app normalizes full-width->half-width in jpn mode already; normalize
+    // here too so the assertion is robust whichever form the engine emitted.
+    const normW = (s) => s
+      .replace(/[！-～]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+      .replace(/[‐-―−]/g, "-");
+    async function runJpnCropAccept(text, filename) {
+      await page.getByText("破棄", { exact: true }).click();
+      await page.waitForSelector(".card", { timeout: 8000 });
+      await page.evaluate(({ text, filename, cjkFamily }) => {
+        const c = document.createElement("canvas");
+        c.width = 780; c.height = 110;
+        const x = c.getContext("2d");
+        x.fillStyle = "#fff"; x.fillRect(0, 0, c.width, c.height);
+        x.fillStyle = "#000"; x.textBaseline = "top"; x.font = `32px "${cjkFamily}"`;
+        x.fillText(text, 24, 38);
+        return new Promise((resolve) => {
+          c.toBlob((blob) => {
+            const file = new File([blob], filename, { type: "image/png" });
+            const input = document.querySelector('input[type=file]:not([capture])');
+            const dt = new DataTransfer();
+            dt.items.add(file);
+            input.files = dt.files;
+            input.dispatchEvent(new Event("change", { bubbles: true }));
+            resolve();
+          }, "image/png");
+        });
+      }, { text, filename, cjkFamily });
+      await expandCropToFull();
+      await page.getByText("この範囲を読み取る", { exact: true }).click();
+      await page.waitForFunction(() => {
+        const ta = document.querySelector("textarea");
+        return ta && ta.value.trim().length > 0;
+      }, { timeout: 150000 });
+      return await page.evaluate(() => document.querySelector("textarea").value);
+    }
+
+    // Image A: 東京都千代田区1-2-3 -> must contain 東京都, 千代田区, and 1-2-3.
+    const rawA = await runJpnCropAccept("東京都千代田区1-2-3", "addr-A.png");
+    const normA = normW(rawA);
+    log("Acceptance A (東京都千代田区1-2-3) recognized:\n  raw: " + rawA.replace(/\n/g, "\\n") + "\n  norm: " + normA.replace(/\n/g, "\\n"));
+    for (const need of ["東京都", "千代田区", "1-2-3"]) {
+      if (normA.indexOf(need) < 0) {
+        return fail("Acceptance A failed: recognized text missing \"" + need + "\".\n  normalized: " + normA + "\n  raw: " + rawA);
+      }
+    }
+    log("Acceptance A PASSED: 東京都 / 千代田区 / 1-2-3 all present.");
+
+    if (cspViolations.length) return fail("CSP violation(s) during acceptance A.");
+    const cspA = await page.evaluate(() => window.__csp || []);
+    if (cspA.length) { cspViolations.push(...cspA); return fail("securitypolicyviolation during acceptance A."); }
+
+    // Image B: 定格 100V 50Hz 1.5A -> must contain 100V, 50Hz, 1.5A.
+    const rawB = await runJpnCropAccept("定格 100V 50Hz 1.5A", "spec-B.png");
+    const normB = normW(rawB).replace(/\s+/g, " ");
+    log("Acceptance B (定格 100V 50Hz 1.5A) recognized:\n  raw: " + rawB.replace(/\n/g, "\\n") + "\n  norm: " + normB.replace(/\n/g, "\\n"));
+    for (const need of ["100V", "50Hz", "1.5A"]) {
+      if (normB.replace(/\s+/g, "").indexOf(need) < 0) {
+        return fail("Acceptance B failed: recognized text missing \"" + need + "\".\n  normalized: " + normB + "\n  raw: " + rawB);
+      }
+    }
+    log("Acceptance B PASSED: 100V / 50Hz / 1.5A all present.");
+
+    if (jsdelivrTraineddata.length) return fail("Acceptance tests fetched traineddata from jsdelivr:\n  " + jsdelivrTraineddata.join("\n  "));
+    if (cspViolations.length) return fail("CSP violation(s) during acceptance B.");
+    const cspB = await page.evaluate(() => window.__csp || []);
+    if (cspB.length) { cspViolations.push(...cspB); return fail("securitypolicyviolation during acceptance B."); }
+  } else {
+    log("Acceptance A/B skipped: no CJK font available to render kanji labels.");
+  }
 
   // ---- 単語フィルタ (word filter) test: decoy cert-mark image on the
   // cropped 英数字 (Paddle) path ----
