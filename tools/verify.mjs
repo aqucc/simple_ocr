@@ -482,10 +482,22 @@ async function main() {
   }, { timeout: 5000 });
   log("Step 6: switched capture view to 日本語+英数字 mode.");
 
-  const hintShown = await page.evaluate(() =>
-    [...document.querySelectorAll(".hint")].some((h) => /日本語/.test(h.textContent) && /MB/i.test(h.textContent)));
-  if (!hintShown) return fail("Japanese-mode first-download size hint (.hint, mentions MB) not shown.");
-  log("Step 7: first-download size hint shown for jpn mode.");
+  // Mode details are behind a collapsed accordion (<details class="acc">).
+  const accClosed = await page.evaluate(() => {
+    const d = [...document.querySelectorAll("details.acc")]
+      .find((x) => x.querySelector("summary").textContent.includes("このモードについて"));
+    return d ? !d.open : null;
+  });
+  if (accClosed !== true) return fail("Mode-info accordion missing or not collapsed by default.");
+  await page.getByText("このモードについて", { exact: true }).click();
+  const hintShown = await page.evaluate(() => {
+    const d = [...document.querySelectorAll("details.acc")]
+      .find((x) => x.querySelector("summary").textContent.includes("このモードについて"));
+    return !!d && d.open && /日本語/.test(d.textContent) && /MB/i.test(d.textContent);
+  });
+  if (!hintShown) return fail("Japanese-mode first-download size hint not revealed by the accordion.");
+  await page.getByText("このモードについて", { exact: true }).click(); // collapse again
+  log("Step 7: mode-info accordion collapsed by default; opening it reveals the jpn download hint.");
 
   const variant = cjkFamily ? "cjk" : "ascii";
   await page.evaluate(({ variant, cjkFamily }) => {

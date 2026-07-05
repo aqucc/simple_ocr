@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-KgL8CM2IRcylUPkfds8K44fMLiChTN2WB0+FoqW8uOA=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-k0J0lLAcFf1htWs+ZEx1f9qRppSOyv8/XjrCHIQT9+c='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-jd7og4OQ/s8gvZKHzkt7UFK0963dDoHsXyLxWeQLNZY=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-8P0MTLtYZVqNYsgxcMTv9j8xnHYwOipaxwNdmBIDCmQ='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
 <title>ラベルOCR</title>
 <style>
 :root{
@@ -124,6 +124,14 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
 .spinner{ width:20px; height:20px; border:3px solid rgba(255,255,255,.4);
   border-top-color:#fff; border-radius:50%; animation:spin .8s linear infinite; }
 @keyframes spin{ to{ transform:rotate(360deg); } }
+details.acc{ margin-top:8px; }
+details.acc summary{ list-style:none; cursor:pointer; min-height:44px;
+  display:flex; align-items:center; gap:6px; color:var(--muted); font-size:13px;
+  -webkit-user-select:none; user-select:none; }
+details.acc summary::-webkit-details-marker{ display:none; }
+details.acc summary::before{ content:"▸"; font-size:11px; transition:transform .15s ease; }
+details.acc[open] summary::before{ transform:rotate(90deg); }
+details.acc .hint{ margin-top:0; }
 .rec .thumb{ cursor:zoom-in; }
 .lightbox{ position:fixed; inset:0; z-index:100; background:rgba(0,0,0,.88);
   display:flex; align-items:center; justify-content:center; padding:16px; cursor:zoom-out; }
@@ -1569,9 +1577,12 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
                 onClick: () => setOcrMode("jpn")
               }, "日本語+英数字")
             ]),
-            ocrMode.value === "eng"
-              ? h("div", { class: "hint" }, "英数字モードは、範囲を選んで読み取ると高精度エンジン PaddleOCR (PP-OCRv4) を使用します。初回の範囲読み取り時のみ、モデルとエンジン（合計 約22MB）をダウンロードします。「全体を読み取る」は Tesseract で処理します。")
-              : h("div", { class: "hint" }, "日本語モードは Tesseract（jpn+eng の複合モデル）を使用します。和文中の半角英数字（住所の 1-2-3 や型番）の精度を上げるため日本語と英数字の学習データを併用し、初回のみ言語データ（約5MB）をダウンロードするため、少し時間がかかります。")
+            h("details", { class: "acc" }, [
+              h("summary", {}, "このモードについて"),
+              ocrMode.value === "eng"
+                ? h("div", { class: "hint" }, "英数字モードは、範囲を選んで読み取ると高精度エンジン PaddleOCR (PP-OCRv4) を使用します。初回の範囲読み取り時のみ、モデルとエンジン（合計 約22MB）をダウンロードします。「全体を読み取る」は Tesseract で処理します。")
+                : h("div", { class: "hint" }, "日本語モードは Tesseract（jpn+eng の複合モデル）を使用します。和文中の半角英数字（住所の 1-2-3 や型番）の精度を上げるため日本語と英数字の学習データを併用し、初回のみ言語データ（約5MB）をダウンロードするため、少し時間がかかります。")
+            ])
           ]),
           h("div", { class: "card" }, [
             h("h2", { class: "sec" }, "ラベルを撮影・選択"),
@@ -1580,7 +1591,10 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
             fileButton("画像を選択", false),
             h("div", { style: { height: "10px" } }),
             h("button", { class: "btn sec", onClick: pasteFromClipboard }, "クリップボードから貼り付け"),
-            h("div", { class: "hint" }, "型番・製造番号のシールを大きく、明るく撮影すると精度が上がります。撮影後に読み取る範囲を選べます。画像をコピーして Ctrl/Cmd+V でも貼り付けできます。")
+            h("details", { class: "acc" }, [
+              h("summary", {}, "撮影のコツ"),
+              h("div", { class: "hint" }, "型番・製造番号のシールを大きく、明るく撮影すると精度が上がります。撮影後に読み取る範囲を選べます。画像をコピーして Ctrl/Cmd+V でも貼り付けできます。")
+            ])
           ])
         ]);
       }
