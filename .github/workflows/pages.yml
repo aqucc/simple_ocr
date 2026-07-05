@@ -28,13 +28,13 @@ jobs:
         with:
           enablement: true
 
-      # 公開するのはアプリ本体と自己ホストの traineddata のみ
+      # 公開するのはアプリ本体と自己ホストの japan モデルのみ
       # （tools/ や README は含めない）
       - name: Stage site
         run: |
           mkdir _site
           cp index.html _site/
-          cp -r tessdata _site/tessdata
+          cp -r models _site/models
 
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-li68jVFs0OrZdk4186GouQMEHdZLTWrsb9cvRiOnVjY=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-75l7J2Hvvw6MK4RsGMyIQi/a9GhqV6uFi4eAv9xR/Xc='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-y6T9BMT/WZO5LmWpT92MYqtpcToH4ihHzXriGciYifE=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-75l7J2Hvvw6MK4RsGMyIQi/a9GhqV6uFi4eAv9xR/Xc='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
 <title>ラベルOCR</title>
 <style>
 :root{
@@ -152,55 +152,62 @@ details.acc .hint{ margin-top:0; }
 </style>
 <div id="app"></div>
 <script src="https://cdn.jsdelivr.net/npm/vue@3.4.38/dist/vue.runtime.global.prod.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
 <script>
 "use strict";
 (function () {
   const { createApp, h, ref, computed, onMounted } = Vue;
 
-  // ---- Pinned CDN dependency paths (Tesseract runtime assets) ----
-  const TESS = {
-    workerPath: "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/worker.min.js",
-    corePath: "https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1"
-  };
-  // Traineddata is SELF-HOSTED under a same-origin tessdata/ directory
-  // (eng.traineddata.gz + jpn.traineddata.gz committed in the repo), NOT
-  // pulled from the two separate @tesseract.js-data/* npm packages on
-  // jsdelivr. Self-hosting is what lets the 日本語 worker load a COMBINED
-  // "jpn+eng" model from a single langPath: jpn.traineddata alone is weak on
-  // half-width ASCII digits embedded in kanji text (an address like
-  // 東京都千代田区1-2-3 loses/garbles the 1-2-3), and jpn+eng is the
-  // established remedy. Both languages are served from the same base URL, so
-  // Tesseract can resolve both files. The langPath is resolved RELATIVE to the
-  // document (new URL below), so it works when the app is served from a
-  // subpath (GitHub Pages: /simple_ocr/tessdata) and not only from the root.
-  // Note: over file:// this fetch fails (no origin) — HTTP(S) serving required
-  // for OCR, same as the other CDN assets.
-  const TESSDATA_PATH = new URL("tessdata", document.baseURI).href.replace(/\/$/, "");
-  const TESS_LANGS = {
-    eng: { lang: "eng", langPath: TESSDATA_PATH },
-    jpn: { lang: "jpn+eng", langPath: TESSDATA_PATH }
-  };
   const LANG_MODE_KEY = "label_ocr_lang_mode";
 
-  // ---- Pinned PaddleOCR (ONNX / onnxruntime-web) assets ----
-  // The cropped 英数字 path runs PP-OCRv4 recognition (rec-only, no detection):
-  // the user has already isolated the text region, so we skip DBNet, split the
-  // crop into lines by projection profile, and CTC-greedy-decode each line.
-  // onnxruntime-web runs single-threaded (GitHub Pages sends no COOP/COEP, so
-  // SharedArrayBuffer is unavailable); SIMD is used, the proxy worker is off.
-  const ORT_VER = "1.19.2";
+  // ---- PaddleOCR (ONNX / onnxruntime-web) — the ONLY OCR engine ----
+  // Both modes run entirely on ONNX Runtime Web + PaddleOCR models; Tesseract
+  // has been retired. Pipelines:
+  //   英数字 (eng): PP-OCRv4 text DETECTION (DBNet) + PP-OCRv4 recognition.
+  //   日本語 (jpn): shared DBNet detection + a japan PP-OCRv3 recognition model.
+  // Cropped reads skip detection (the user already isolated the region) and go
+  // straight to the rec path; 「全体を読み取る」 runs DBNet first to find every
+  // text line, crops each, then recognizes it. onnxruntime-web runs
+  // single-threaded (GitHub Pages sends no COOP/COEP, so SharedArrayBuffer is
+  // unavailable); SIMD is on, the proxy worker is off.
   const ORT = {
     script: "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.wasm.min.js",
     wasmDir: "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/"
   };
   const PADDLE = {
-    rec: "https://cdn.jsdelivr.net/npm/@gutenye/ocr-models@1.4.2/assets/ch_PP-OCRv4_rec_infer.onnx",
-    dict: "https://cdn.jsdelivr.net/npm/@gutenye/ocr-models@1.4.2/assets/ppocr_keys_v1.txt"
+    // Shared DBNet detector + PP-OCRv4 rec/keys come from @gutenye/ocr-models on
+    // jsdelivr (connect-src allows cdn.jsdelivr.net).
+    det: "https://cdn.jsdelivr.net/npm/@gutenye/ocr-models@1.4.2/assets/ch_PP-OCRv4_det_infer.onnx",
+    engRec: "https://cdn.jsdelivr.net/npm/@gutenye/ocr-models@1.4.2/assets/ch_PP-OCRv4_rec_infer.onnx",
+    engDict: "https://cdn.jsdelivr.net/npm/@gutenye/ocr-models@1.4.2/assets/ppocr_keys_v1.txt",
+    // The japan PP-OCRv3 rec model + its 4399-entry dict are SELF-HOSTED under a
+    // same-origin models/ directory (committed in the repo); connect-src 'self'
+    // covers them. Resolved relative to the document so it works from a subpath
+    // (GitHub Pages: /simple_ocr/models). Over file:// this fetch fails (no
+    // origin) — HTTP(S) serving is required for OCR, same as the CDN assets.
+    jpnRec: new URL("models/japan_rec.onnx", document.baseURI).href,
+    jpnDict: new URL("models/japan_dict.txt", document.baseURI).href
   };
-  // PP-OCR rec normalization: (x/255 - 0.5) / 0.5, channel order B,G,R (cv2/BGR,
-  // matching PaddleOCR training). Height fixed to 48, width kept proportional.
+  // Per-mode recognition config. Both PP-OCR rec models fix input height to 48
+  // (the japan model has an internal reshape that REQUIRES exactly 48) and use
+  // (x/255 - 0.5)/0.5 normalization with cv2/BGR channel order (matching
+  // PaddleOCR training). CTCLabelDecode index 0 = blank, indices 1..N map to
+  // dict[i-1]; the character list is the dict lines plus a trailing space
+  // (use_space_char), so N = dict.length + 1. The japan dict already ends with
+  // its own space entry AND the model was exported with an extra appended
+  // space, so appending one here still lands on C-1 (verified: japan rec C =
+  // 4401 = 4399 dict + 1 space + 1 blank).
+  const REC_CFG = {
+    eng: { rec: PADDLE.engRec, dict: PADDLE.engDict, label: "PaddleOCR (PP-OCRv4)" },
+    jpn: { rec: PADDLE.jpnRec, dict: PADDLE.jpnDict, label: "PaddleOCR (PP-OCRv3 · japan)" }
+  };
   const REC_H = 48;
+  // DBNet detection post-process params (validated against the PP-OCRv4 det
+  // model): resize long side <= 960 (each dim rounded to a multiple of 32),
+  // normalize per-channel with ImageNet RGB mean/std, threshold the prob map at
+  // 0.3, keep connected components whose mean prob >= 0.5 and area >= 9, then
+  // unclip each box outward by distance = area * 1.6 / perimeter.
+  const DET_MAX_SIDE = 960, DET_THRESH = 0.3, DET_BOX_THRESH = 0.5, DET_MIN_AREA = 9, DET_UNCLIP = 1.6;
+  const DET_MEAN = [0.485, 0.456, 0.406], DET_STD = [0.229, 0.224, 0.225];
 
   // ---- Pinned English wordlist (単語フィルタ dictionary check) ----
   // npm `word-list` (Sindre Sorhus): a plain lowercase words.txt, ~274k
@@ -292,25 +299,6 @@ details.acc .hint{ margin-top:0; }
       .replace(/[！-～]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
       .replace(/　/g, " ")
       .replace(/[‐-―−⁃﹘﹣]/g, "-");
-  }
-
-  // Rebuild recognized text keeping only words with confidence >= 35,
-  // preserving line breaks (tesseract.js v5: data.lines[].words[].confidence,
-  // both 0..100 scales, verified at runtime). Returns null (not "") when the
-  // result has no structured .lines to filter, so the caller can fall back
-  // to the raw text; a real empty-after-filtering result stays "".
-  function filterLowConfWords(data) {
-    if (!data || !Array.isArray(data.lines) || !data.lines.length) return null;
-    const outLines = [];
-    for (const line of data.lines) {
-      const words = Array.isArray(line && line.words) ? line.words : [];
-      const kept = words
-        .filter((w) => w && typeof w.text === "string" && w.text.trim() &&
-          (typeof w.confidence !== "number" || w.confidence >= 35))
-        .map((w) => w.text);
-      if (kept.length) outLines.push(kept.join(" "));
-    }
-    return outLines.join("\n");
   }
 
   // ---------------- Word filter (単語フィルタ): hybrid dictionary + pattern
@@ -498,101 +486,6 @@ details.acc .hint{ margin-top:0; }
     return c;
   }
 
-  // Full-image preprocess for the Tesseract path: downscale, grayscale,
-  // percentile contrast stretch. (Cropped regions use preprocessCrop below.)
-  function preprocess(src) {
-    const c = drawScaled(src, 1600);
-    const ctx = c.getContext("2d");
-    const img = ctx.getImageData(0, 0, c.width, c.height);
-    const d = img.data;
-    const n = d.length / 4;
-    const gray = new Uint8ClampedArray(n);
-    const hist = new Uint32Array(256);
-    for (let i = 0; i < n; i++) {
-      const r = d[i * 4], g = d[i * 4 + 1], b = d[i * 4 + 2];
-      const y = (r * 0.299 + g * 0.587 + b * 0.114) | 0;
-      gray[i] = y; hist[y]++;
-    }
-    const lowCut = n * 0.02, highCut = n * 0.98;
-    let acc = 0, lo = 0, hi = 255;
-    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= lowCut) { lo = v; break; } }
-    acc = 0;
-    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= highCut) { hi = v; break; } }
-    if (hi <= lo) { lo = 0; hi = 255; }
-    const range = hi - lo;
-    for (let i = 0; i < n; i++) {
-      let v = (gray[i] - lo) * 255 / range;
-      v = v < 0 ? 0 : v > 255 ? 255 : v;
-      d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = v;
-      d[i * 4 + 3] = 255;
-    }
-    ctx.putImageData(img, 0, 0);
-    return c;
-  }
-
-  // Adaptive mean threshold via a summed-area table (integral image): for
-  // each pixel, compare it against its local window mean +/- C. Robust to
-  // uneven lighting / glossy-label glare that a single global Otsu threshold
-  // leaves as background blotches (phantom "ink"). Polarity (dark text on
-  // light background vs. the reverse) is still decided by the caller via a
-  // single global statistic (Otsu dark-ratio) -- that's a property of the
-  // whole crop, not of any one neighborhood.
-  function adaptiveThreshold(gray, cw, ch, win, C, textIsDark) {
-    const half = win >> 1;
-    const integral = new Float64Array((cw + 1) * (ch + 1));
-    for (let y = 0; y < ch; y++) {
-      let rowSum = 0;
-      const rowBase = y * cw;
-      const iRow = (y + 1) * (cw + 1);
-      const iRowPrev = y * (cw + 1);
-      for (let x = 0; x < cw; x++) {
-        rowSum += gray[rowBase + x];
-        integral[iRow + x + 1] = integral[iRowPrev + x + 1] + rowSum;
-      }
-    }
-    const mask = new Uint8Array(cw * ch); // 1 = ink, 0 = background
-    for (let y = 0; y < ch; y++) {
-      const y0 = y - half < 0 ? 0 : y - half, y1 = y + half >= ch ? ch - 1 : y + half;
-      for (let x = 0; x < cw; x++) {
-        const x0 = x - half < 0 ? 0 : x - half, x1 = x + half >= cw ? cw - 1 : x + half;
-        const area = (x1 - x0 + 1) * (y1 - y0 + 1);
-        const sum = integral[(y1 + 1) * (cw + 1) + (x1 + 1)]
-                  - integral[y0 * (cw + 1) + (x1 + 1)]
-                  - integral[(y1 + 1) * (cw + 1) + x0]
-                  + integral[y0 * (cw + 1) + x0];
-        const mean = sum / area;
-        const v = gray[y * cw + x];
-        const ink = textIsDark ? (v < mean - C) : (v > mean + C);
-        mask[y * cw + x] = ink ? 1 : 0;
-      }
-    }
-    return mask;
-  }
-
-  // Remove small connected components of "ink" (area < minArea) from a
-  // 0/1 mask via iterative (stack-based) flood fill / 4-connectivity
-  // labeling. Bounded: crops are capped at ~2000px on the long side.
-  function despeckle(mask, cw, ch, minArea) {
-    const n = cw * ch;
-    const visited = new Uint8Array(n);
-    const stack = new Int32Array(n);
-    for (let start = 0; start < n; start++) {
-      if (!mask[start] || visited[start]) continue;
-      let sp = 0;
-      stack[sp++] = start; visited[start] = 1;
-      const comp = [start];
-      while (sp > 0) {
-        const idx = stack[--sp];
-        const x = idx % cw, y = (idx / cw) | 0;
-        if (x > 0) { const m = idx - 1; if (mask[m] && !visited[m]) { visited[m] = 1; stack[sp++] = m; comp.push(m); } }
-        if (x < cw - 1) { const m = idx + 1; if (mask[m] && !visited[m]) { visited[m] = 1; stack[sp++] = m; comp.push(m); } }
-        if (y > 0) { const m = idx - cw; if (mask[m] && !visited[m]) { visited[m] = 1; stack[sp++] = m; comp.push(m); } }
-        if (y < ch - 1) { const m = idx + cw; if (mask[m] && !visited[m]) { visited[m] = 1; stack[sp++] = m; comp.push(m); } }
-      }
-      if (comp.length < minArea) { for (const idx of comp) mask[idx] = 0; }
-    }
-  }
-
   function otsuThreshold(hist, total) {
     let sum = 0;
     for (let i = 0; i < 256; i++) sum += i * hist[i];
@@ -609,8 +502,8 @@ details.acc .hint{ margin-top:0; }
   }
 
   // Locate horizontal text bands in an image via a projection profile.
-  // Returns [{y0,y1}] in the source's own pixel coordinates. Used both to
-  // split the crop into single lines (Paddle) and to pick Tesseract PSM.
+  // Returns [{y0,y1}] in the source's own pixel coordinates. Used to split a
+  // crop (or a detected text box) into single lines for the rec path.
   function findTextBands(src) {
     const { w, h } = dims(src);
     const scale = Math.min(1, 1000 / Math.max(w, h));
@@ -700,74 +593,6 @@ details.acc .hint{ margin-top:0; }
       out.push({ y0: Math.round(y0 * inv), y1: Math.round((y1 + 1) * inv) });
     }
     return out.length ? out : [{ y0: 0, y1: h }];
-  }
-
-  // Cropped-region preprocess for Tesseract: upscale small crops so text is
-  // legible, grayscale, percentile stretch, Otsu binarize with polarity
-  // detection (invert white-on-dark). Returns {canvas, singleLine}.
-  function preprocessCrop(src) {
-    const bands = findTextBands(src);
-    const { w, h } = dims(src);
-    const short = Math.min(w, h), long = Math.max(w, h);
-    let f = 1;
-    if (short < 300) f = Math.min(3, Math.max(2, Math.ceil(300 / short)));
-    if (long * f > 2000) f = Math.max(1, 2000 / long);
-    const cw = Math.max(1, Math.round(w * f)), ch = Math.max(1, Math.round(h * f));
-    const c = newCanvas(cw, ch);
-    const ctx = c.getContext("2d");
-    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
-    ctx.drawImage(src, 0, 0, cw, ch);
-    const img = ctx.getImageData(0, 0, cw, ch);
-    const d = img.data; const n = cw * ch;
-    const gray = new Uint8ClampedArray(n);
-    const hist = new Uint32Array(256);
-    for (let i = 0; i < n; i++) {
-      const y = (d[i * 4] * 0.299 + d[i * 4 + 1] * 0.587 + d[i * 4 + 2] * 0.114) | 0;
-      gray[i] = y; hist[y]++;
-    }
-    const lowCut = n * 0.02, highCut = n * 0.98;
-    let acc = 0, lo = 0, hi = 255;
-    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= lowCut) { lo = v; break; } }
-    acc = 0;
-    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= highCut) { hi = v; break; } }
-    if (hi <= lo) { lo = 0; hi = 255; }
-    const range = hi - lo;
-    const hist2 = new Uint32Array(256);
-    for (let i = 0; i < n; i++) {
-      let v = (gray[i] - lo) * 255 / range;
-      v = v < 0 ? 0 : v > 255 ? 255 : v; v = v | 0;
-      gray[i] = v; hist2[v]++;
-    }
-    // Polarity (dark-text-on-light vs. light-text-on-dark) is a property of
-    // the whole crop, so it's still decided from one global statistic: Otsu
-    // dark-ratio (text is the minority class).
-    const t = otsuThreshold(hist2, n);
-    let dark = 0;
-    for (let i = 0; i < n; i++) if (gray[i] < t) dark++;
-    const textIsDark = dark <= n - dark;
-
-    // Local adaptive mean threshold instead of a single global cut: uneven
-    // lighting / glossy labels leave background blotches under global Otsu,
-    // which read as phantom characters. Window ~ shorter-side/8 (odd, >=15).
-    const win = (() => {
-      const w0 = Math.max(15, Math.round(Math.min(cw, ch) / 8));
-      return w0 % 2 === 0 ? w0 + 1 : w0;
-    })();
-    const C = 10;
-    const mask = adaptiveThreshold(gray, cw, ch, win, C, textIsDark);
-
-    // Despeckle: drop small connected "ink" components (noise specks) left
-    // over after binarization -- isolated pixels are removed by the same
-    // area filter since a lone pixel is a 1-pixel component.
-    const despeckleMin = Math.max(4, Math.round((ch / 60) * (ch / 60)));
-    despeckle(mask, cw, ch, despeckleMin);
-
-    for (let i = 0; i < n; i++) {
-      const val = mask[i] ? 0 : 255;
-      d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = val; d[i * 4 + 3] = 255;
-    }
-    ctx.putImageData(img, 0, 0);
-    return { canvas: c, singleLine: bands.length <= 1 };
   }
 
   // Extract the on-screen crop rectangle (fractions 0..1) as original-image pixels.
@@ -1039,46 +864,7 @@ details.acc .hint{ margin-top:0; }
     return drawScaled(src, 800).toDataURL("image/jpeg", 0.7);
   }
 
-  // ---------------- Tesseract worker ----------------
-  // At most one live worker at a time (iPhone memory). It is cached and
-  // reused while its mode stays the active mode; switching mode terminates
-  // the previous worker before creating the new one, on the next OCR run.
-  let tessWorker = null;
-  let tessWorkerMode = null;
-  async function getWorker(mode, onLog) {
-    if (tessWorker && tessWorkerMode === mode) return tessWorker;
-    if (tessWorker) {
-      const old = tessWorker;
-      tessWorker = null; tessWorkerMode = null;
-      try { await old.terminate(); } catch (e) { /* ignore */ }
-    }
-    if (typeof Tesseract === "undefined") throw new Error("OCRエンジンの読み込みに失敗しました");
-    const cfg = TESS_LANGS[mode] || TESS_LANGS.eng;
-    tessWorker = await Tesseract.createWorker(cfg.lang, 1 /* OEM.LSTM_ONLY */, {
-      workerPath: TESS.workerPath,
-      corePath: TESS.corePath,
-      langPath: cfg.langPath,
-      logger: onLog
-    });
-    tessWorkerMode = mode;
-    return tessWorker;
-  }
-  async function releaseTessWorker() {
-    if (!tessWorker) return;
-    const old = tessWorker; tessWorker = null; tessWorkerMode = null;
-    try { await old.terminate(); } catch (e) { /* ignore */ }
-  }
-  function mapStatus(s) {
-    if (!s) return "処理中…";
-    if (s.indexOf("core") >= 0) return "エンジンを読み込み中…";
-    if (s.indexOf("lang") >= 0 || s.indexOf("traineddata") >= 0) return "言語データを読み込み中…";
-    if (s.indexOf("initializ") >= 0) return "初期化中…";
-    if (s.indexOf("recognizing") >= 0) return "認識中…";
-    if (s.indexOf("loading") >= 0) return "読み込み中…";
-    return "処理中…";
-  }
-
-  // ---------------- PaddleOCR (onnxruntime-web, rec-only) ----------------
+  // ---------------- PaddleOCR (onnxruntime-web) ----------------
   let ortScriptPromise = null;
   function loadOrt() {
     if (window.ort) return Promise.resolve(window.ort);
@@ -1093,42 +879,75 @@ details.acc .hint{ margin-top:0; }
     return ortScriptPromise;
   }
 
-  let paddleSession = null;
-  let paddleDict = null;
-  let paddleLoading = null;
-  async function getPaddle(onStatus) {
-    if (paddleSession && paddleDict) return { session: paddleSession, dict: paddleDict };
-    if (paddleLoading) return paddleLoading;
-    paddleLoading = (async () => {
-      if (onStatus) onStatus("OCRエンジンを準備中…", 0.2);
-      const ort = await loadOrt();
+  // onnxruntime-web env is configured exactly once, the first time any model
+  // is loaded (det or either rec model share the same wasm runtime).
+  let ortEnvSet = false;
+  async function ortReady(onStatus) {
+    if (onStatus) onStatus("OCRエンジンを準備中…", 0.2);
+    const ort = await loadOrt();
+    if (!ortEnvSet) {
       ort.env.wasm.numThreads = 1;      // GitHub Pages: no COOP/COEP -> no SharedArrayBuffer
       ort.env.wasm.proxy = false;       // no proxy worker (keeps CSP simple)
       ort.env.wasm.simd = true;
       ort.env.wasm.wasmPaths = ORT.wasmDir;
+      ortEnvSet = true;
+    }
+    return ort;
+  }
+
+  // Recognition sessions are cached per mode (eng: PP-OCRv4 ch+ASCII; jpn:
+  // PP-OCRv3 japan). At most one live rec session besides the active one is
+  // kept — switching mode releases the other to bound memory on phones.
+  const recSessions = {};   // mode -> { session, dict }
+  const recLoading = {};    // mode -> Promise
+  async function getRec(mode, onStatus) {
+    const key = REC_CFG[mode] ? mode : "eng";
+    if (recSessions[key]) return recSessions[key];
+    if (recLoading[key]) return recLoading[key];
+    recLoading[key] = (async () => {
+      const ort = await ortReady(onStatus);
+      const cfg = REC_CFG[key];
       if (onStatus) onStatus("モデルを読み込み中…", 0.45);
       const [session, dictText] = await Promise.all([
-        ort.InferenceSession.create(PADDLE.rec, { executionProviders: ["wasm"], graphOptimizationLevel: "all" }),
-        fetch(PADDLE.dict).then((r) => { if (!r.ok) throw new Error("辞書ファイルの取得に失敗しました"); return r.text(); })
+        ort.InferenceSession.create(cfg.rec, { executionProviders: ["wasm"], graphOptimizationLevel: "all" }),
+        fetch(cfg.dict).then((r) => { if (!r.ok) throw new Error("辞書ファイルの取得に失敗しました"); return r.text(); })
       ]);
-      paddleSession = session;
-      // PaddleOCR CTCLabelDecode: index 0 = blank, indices 1..N map to dict[i-1];
-      // dict = each line of ppocr_keys_v1.txt plus a trailing space char.
-      // A trailing newline in the file must not become an extra empty entry,
-      // or the space char (and nothing else) would decode to "".
-      const lines = dictText.split("\n");
+      // PaddleOCR CTCLabelDecode: index 0 = blank, indices 1..N map to the
+      // character list, which is the dict lines plus a trailing space
+      // (use_space_char). Strip CR (the japan dict ships CRLF) and any trailing
+      // blank line before appending, or the space entry would shift.
+      const lines = dictText.replace(/\r/g, "").split("\n");
       while (lines.length && lines[lines.length - 1] === "") lines.pop();
-      paddleDict = [...lines, " "];
-      return { session: paddleSession, dict: paddleDict };
+      recSessions[key] = { session, dict: [...lines, " "] };
+      return recSessions[key];
     })();
-    try { return await paddleLoading; }
-    finally { paddleLoading = null; }
+    try { return await recLoading[key]; }
+    finally { recLoading[key] = null; }
   }
-  function releasePaddle() {
-    if (paddleSession) {
-      try { if (paddleSession.release) paddleSession.release(); } catch (e) { /* ignore */ }
-      paddleSession = null;
+  function releaseSession(s) {
+    try { if (s && s.session && s.session.release) s.session.release(); } catch (e) { /* ignore */ }
+  }
+  // Free every cached rec session for a mode other than `keep`.
+  function releaseOtherRec(keep) {
+    for (const m of Object.keys(recSessions)) {
+      if (m !== keep) { releaseSession(recSessions[m]); delete recSessions[m]; }
     }
+  }
+
+  // Shared DBNet text detector (used by 「全体を読み取る」 in both modes).
+  let detSession = null;
+  let detLoading = null;
+  async function getDet(onStatus) {
+    if (detSession) return detSession;
+    if (detLoading) return detLoading;
+    detLoading = (async () => {
+      const ort = await ortReady(onStatus);
+      if (onStatus) onStatus("検出モデルを読み込み中…", 0.4);
+      detSession = await ort.InferenceSession.create(PADDLE.det, { executionProviders: ["wasm"], graphOptimizationLevel: "all" });
+      return detSession;
+    })();
+    try { return await detLoading; }
+    finally { detLoading = null; }
   }
 
   function lineCanvasFrom(src, band) {
@@ -1141,12 +960,50 @@ details.acc .hint{ margin-top:0; }
     return c;
   }
 
+  // Trim leading/trailing whitespace columns from a line canvas so recOne
+  // resizes only the inked span to width x 48. Without this, a wide crop that
+  // is mostly whitespace (e.g. 「全体を読み取る」 or an over-wide user crop)
+  // compresses the text horizontally and the rec model can drop characters
+  // (observed: the "z" of 50Hz). Pure geometry — Otsu polarity, same as
+  // findTextBands. Returns the input unchanged if it finds no ink.
+  function trimLineToInk(lineCanvas) {
+    const { w: lw, h: lh } = dims(lineCanvas);
+    const scale = Math.min(1, 1400 / lw);
+    const aw = Math.max(1, Math.round(lw * scale)), ah = Math.max(1, Math.round(lh * scale));
+    const ac = newCanvas(aw, ah);
+    ac.getContext("2d").drawImage(lineCanvas, 0, 0, aw, ah);
+    const d = ac.getContext("2d").getImageData(0, 0, aw, ah).data;
+    const n = aw * ah;
+    const gray = new Uint8Array(n), hist = new Uint32Array(256);
+    for (let i = 0; i < n; i++) {
+      const y = (d[i * 4] * 0.299 + d[i * 4 + 1] * 0.587 + d[i * 4 + 2] * 0.114) | 0;
+      gray[i] = y; hist[y]++;
+    }
+    const t = otsuThreshold(hist, n);
+    let dark = 0;
+    for (let i = 0; i < n; i++) if (gray[i] < t) dark++;
+    const textIsDark = dark <= n - dark;
+    let minx = -1, maxx = -1;
+    for (let x = 0; x < aw; x++) {
+      let ink = false;
+      for (let y = 0; y < ah; y++) { const isDark = gray[y * aw + x] < t; if (textIsDark ? isDark : !isDark) { ink = true; break; } }
+      if (ink) { if (minx < 0) minx = x; maxx = x; }
+    }
+    if (minx < 0) return lineCanvas;
+    const inv = 1 / scale;
+    const pad = Math.max(1, Math.round(ah * 0.1 * inv));
+    const x0 = clamp(Math.round(minx * inv) - pad, 0, lw - 1);
+    const x1 = clamp(Math.round((maxx + 1) * inv) + pad, x0 + 1, lw);
+    if (x0 === 0 && x1 === lw) return lineCanvas;
+    return subCanvas(lineCanvas, { x0, y0: 0, x1, y1: lh });
+  }
+
   // Word-level segmentation within one already-line-banded canvas: build a
   // column ink profile (grayscale + Otsu, same polarity logic as
   // findTextBands) and split on runs of empty columns wide enough to be
   // inter-word whitespace rather than intra-word letter spacing -- "as if a
   // human had drawn a box around each word". This is what lets
-  // paddleRecognize (a) reject just a failing word (e.g. a barcode-stripe
+  // paddleRecognizeCrop (a) reject just a failing word (e.g. a barcode-stripe
   // segment next to real digits) instead of the whole line, and (b) recover
   // multi-word lines the CTC decoder doesn't reliably print a space within
   // (e.g. "MADE IN JAPAN" -> "MADEINJAPAN" on this rec model).
@@ -1160,9 +1017,19 @@ details.acc .hint{ margin-top:0; }
   // Otherwise returns [{x0,x1,y0,y1}, ...] word boxes in the input canvas's
   // own pixel coordinates, y-tightened to each word's own ink rows (plus
   // ~15% padding all around, clamped to the canvas).
+  // 英数字 splits on gaps >= 0.45x line height (normal inter-word spacing).
+  // 日本語 uses a much LOOSER gap (>= 1.1x line height) so it only ever splits
+  // on the wide spaces that separate distinct label fields (定格 / 100V / 50Hz /
+  // 1.5A) — continuous Japanese (東京都千代田区1-2-3) has no such gaps and stays
+  // whole. Splitting matters for jpn too: recognizing each field on its own
+  // tightly-cropped canvas avoids the horizontal compression that drops
+  // characters (e.g. the "z" of 50Hz) when a wide, mostly-whitespace line is
+  // squeezed to width x 48 in one shot.
   const WORD_GAP_HEIGHT_RATIO = 0.45;
+  const JPN_WORD_GAP_HEIGHT_RATIO = 1.1;
   const WORD_MAX_SEGMENTS = 24;
-  function segmentWordsInLine(lineCanvas) {
+  function segmentWordsInLine(lineCanvas, gapRatio) {
+    const ratio = gapRatio || WORD_GAP_HEIGHT_RATIO;
     const { w: lw, h: lh } = dims(lineCanvas);
     const scale = Math.min(1, 1400 / lw);
     const aw = Math.max(1, Math.round(lw * scale)), ah = Math.max(1, Math.round(lh * scale));
@@ -1194,7 +1061,7 @@ details.acc .hint{ margin-top:0; }
     if (maxCol === 0) return null;
 
     const emptyFloor = Math.max(0, Math.round(maxCol * 0.05));
-    const gapThreshold = Math.max(3, Math.round(ah * WORD_GAP_HEIGHT_RATIO));
+    const gapThreshold = Math.max(3, Math.round(ah * ratio));
 
     // Column run-length split: a run of empty columns >= gapThreshold starts
     // a new word segment; shorter gaps (letter spacing within a word) don't.
@@ -1299,36 +1166,126 @@ details.acc .hint{ margin-top:0; }
     return c;
   }
 
-  // PaddleOCR CTC decode has no built-in confidence rejection in this
-  // rec-only setup, but upstream PaddleOCR drops results with score < 0.5;
-  // do the same here so noise-only bands (fed in by findTextBands on crops
-  // with no real text) don't surface hallucinated characters. Also: the
-  // ch(+ASCII) dictionary hallucinates CJK glyphs on pure noise, and this
-  // path (paddleRecognize) is only ever used in 英数字 mode (see runOcr),
-  // so stripping non-ASCII here is a safe, always-applicable post-filter.
+  // ---------------- DBNet text detection (PP-OCRv4 det) ----------------
+  // Group axis-aligned boxes into reading order: sort top-to-bottom, cluster
+  // boxes whose vertical ranges overlap by >40% of the shorter box into rows,
+  // then order each row left-to-right. Labels are roughly horizontal (upstream
+  // deskew handles small tilt), so axis-aligned rows are sufficient.
+  function groupReadingOrder(boxes) {
+    if (boxes.length <= 1) return boxes;
+    const sorted = boxes.slice().sort((a, b) => a.y0 - b.y0);
+    const rows = [];
+    for (const b of sorted) {
+      let placed = false;
+      for (const row of rows) {
+        const ov = Math.min(row.y1, b.y1) - Math.max(row.y0, b.y0);
+        const minH = Math.min(row.y1 - row.y0, b.y1 - b.y0);
+        if (ov > 0.4 * minH) {
+          row.items.push(b); row.y0 = Math.min(row.y0, b.y0); row.y1 = Math.max(row.y1, b.y1);
+          placed = true; break;
+        }
+      }
+      if (!placed) rows.push({ y0: b.y0, y1: b.y1, items: [b] });
+    }
+    rows.sort((a, b) => a.y0 - b.y0);
+    const out = [];
+    for (const row of rows) { row.items.sort((a, b) => a.x0 - b.x0); for (const it of row.items) out.push(it); }
+    return out;
+  }
+
+  // Run DBNet on a whole image and return axis-aligned text boxes (original
+  // pixel coordinates), in reading order. Post-process: resize long side <=960
+  // (dims multiple of 32), ImageNet-normalize RGB, threshold the prob map at
+  // 0.3, flood-fill 4-connected components, keep those with mean prob >= 0.5
+  // and area >= DET_MIN_AREA, unclip outward, clamp, map back to the original.
+  async function detectTextBoxes(ort, session, src) {
+    const { w, h } = dims(src);
+    const scale = Math.min(1, DET_MAX_SIDE / Math.max(w, h));
+    const nw = Math.max(32, Math.round(Math.round(w * scale) / 32) * 32);
+    const nh = Math.max(32, Math.round(Math.round(h * scale) / 32) * 32);
+    const c = newCanvas(nw, nh);
+    const ctx = c.getContext("2d");
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(src, 0, 0, nw, nh);
+    const d = ctx.getImageData(0, 0, nw, nh).data;
+    const n = nw * nh;
+    const input = new Float32Array(3 * n);
+    for (let i = 0; i < n; i++) {
+      input[i]         = (d[i * 4]     / 255 - DET_MEAN[0]) / DET_STD[0]; // R plane (RGB order)
+      input[n + i]     = (d[i * 4 + 1] / 255 - DET_MEAN[1]) / DET_STD[1]; // G
+      input[2 * n + i] = (d[i * 4 + 2] / 255 - DET_MEAN[2]) / DET_STD[2]; // B
+    }
+    const tensor = new ort.Tensor("float32", input, [1, 3, nh, nw]);
+    const feeds = {}; feeds[session.inputNames[0]] = tensor;
+    const out = await session.run(feeds);
+    const prob = out[session.outputNames[0]].data; // [1,1,nh,nw]
+    const mask = new Uint8Array(n);
+    for (let i = 0; i < n; i++) mask[i] = prob[i] > DET_THRESH ? 1 : 0;
+    const visited = new Uint8Array(n);
+    const stack = new Int32Array(n);
+    const fx = w / nw, fy = h / nh;
+    const boxes = [];
+    for (let start = 0; start < n; start++) {
+      if (!mask[start] || visited[start]) continue;
+      let sp = 0; stack[sp++] = start; visited[start] = 1;
+      let minx = nw, maxx = 0, miny = nh, maxy = 0, cnt = 0, psum = 0;
+      while (sp > 0) {
+        const idx = stack[--sp];
+        const x = idx % nw, y = (idx / nw) | 0;
+        cnt++; psum += prob[idx];
+        if (x < minx) minx = x; if (x > maxx) maxx = x;
+        if (y < miny) miny = y; if (y > maxy) maxy = y;
+        if (x > 0) { const m = idx - 1; if (mask[m] && !visited[m]) { visited[m] = 1; stack[sp++] = m; } }
+        if (x < nw - 1) { const m = idx + 1; if (mask[m] && !visited[m]) { visited[m] = 1; stack[sp++] = m; } }
+        if (y > 0) { const m = idx - nw; if (mask[m] && !visited[m]) { visited[m] = 1; stack[sp++] = m; } }
+        if (y < nh - 1) { const m = idx + nw; if (mask[m] && !visited[m]) { visited[m] = 1; stack[sp++] = m; } }
+      }
+      const bw = maxx - minx + 1, bh = maxy - miny + 1;
+      if (cnt < DET_MIN_AREA || bw < 3 || bh < 3) continue;
+      const score = psum / cnt;
+      if (score < DET_BOX_THRESH) continue;
+      const per = 2 * (bw + bh);
+      const dist = per ? cnt * DET_UNCLIP / per : 0;
+      const x0 = clamp(Math.round((minx - dist) * fx), 0, w - 1);
+      const y0 = clamp(Math.round((miny - dist) * fy), 0, h - 1);
+      const x1 = clamp(Math.round((maxx + 1 + dist) * fx), x0 + 1, w);
+      const y1 = clamp(Math.round((maxy + 1 + dist) * fy), y0 + 1, h);
+      boxes.push({ x0, y0, x1, y1, score });
+    }
+    return groupReadingOrder(boxes);
+  }
+
+  // ---------------- Recognition over a crop ----------------
+  // Recognize an already-isolated region (the on-screen crop, a de-warped quad,
+  // or a single DBNet-detected box). Split into line bands, and — in 英数字
+  // mode only — further split each band into per-word sub-images
+  // (segmentWordsInLine, "as if a human had drawn a box around each word") so a
+  // single failing word (e.g. a barcode stripe mis-banded next to real digits)
+  // is dropped without taking the rest of the line down with it, and multi-word
+  // lines survive even when this rec model glues them ("MADE IN JAPAN" ->
+  // "MADEINJAPAN"). Every word/line is score-gated at 0.5 (PaddleOCR's own
+  // garbage threshold).
   //
-  // Each line band is further split into per-word sub-images by
-  // segmentWordsInLine (see there) -- "as if a human had drawn a box around
-  // each word" -- and each word is recognized and confidence-gated
-  // independently. This is what lets a single failing word (e.g. a barcode
-  // stripe segment mis-banded next to real digits) get dropped WITHOUT
-  // taking the rest of the line down with it, and lets multi-word lines
-  // survive even when the CTC decoder doesn't reliably emit a space between
-  // words on this input. When segmentWordsInLine finds nothing to split
-  // (one block, or too many to plausibly be words), the band is recognized
-  // whole exactly as before.
-  async function paddleRecognize(cropCanvas, onStatus) {
-    const { session, dict } = await getPaddle(onStatus);
+  // 英数字 (eng): the ch(+ASCII) rec model hallucinates CJK glyphs on noise, so
+  // non-ASCII output is stripped here (this path is ASCII-only by design).
+  // 日本語 (jpn): word-splitting uses a LOOSENED gap (only wide field gaps split;
+  // continuous kana/kanji stays whole) and the ASCII strip is NOT applied
+  // (kana/kanji must survive) — instead full-width ASCII/digits/dashes are
+  // folded to half-width via normalizeWidth so addresses/model numbers read
+  // back plain.
+  async function paddleRecognizeCrop(cropCanvas, mode, onStatus, quiet) {
+    const { session, dict } = await getRec(mode, onStatus);
     const ort = window.ort;
-    if (onStatus) onStatus("認識中…", 0.85);
+    const isEng = mode === "eng";
+    if (onStatus && !quiet) onStatus("認識中…", 0.85);
     const bands = findTextBands(cropCanvas);
     const kept = [];
     for (let i = 0; i < bands.length; i++) {
       const lc = lineCanvasFrom(cropCanvas, bands[i]);
-      const wordBoxes = segmentWordsInLine(lc);
+      const wordBoxes = segmentWordsInLine(lc, isEng ? WORD_GAP_HEIGHT_RATIO : JPN_WORD_GAP_HEIGHT_RATIO);
       const wordResults = [];
       if (!wordBoxes) {
-        wordResults.push(await recOne(ort, session, dict, lc));
+        wordResults.push(await recOne(ort, session, dict, trimLineToInk(lc)));
       } else {
         for (const box of wordBoxes) {
           wordResults.push(await recOne(ort, session, dict, subCanvas(lc, box)));
@@ -1337,18 +1294,44 @@ details.acc .hint{ margin-top:0; }
       const keptWords = [];
       for (const { text, score } of wordResults) {
         if (!text || score < 0.5) continue;
-        const ascii = text.replace(/[^\x00-\x7F]/g, "").replace(/[ \t]+/g, " ").trim();
-        if (!ascii) continue;
-        keptWords.push({ text: ascii, score });
+        const cleaned = isEng
+          ? text.replace(/[^\x00-\x7F]/g, "").replace(/[ \t]+/g, " ").trim()
+          : normalizeWidth(text).replace(/[ \t]+/g, " ").trim();
+        if (!cleaned) continue;
+        keptWords.push({ text: cleaned, score });
       }
       if (!keptWords.length) continue;
       const lineScore = keptWords.reduce((a, k) => a + k.score, 0) / keptWords.length;
       kept.push({ text: keptWords.map((k) => k.text).join(" "), score: lineScore });
     }
-    if (onStatus) onStatus("完了", 1);
+    if (onStatus && !quiet) onStatus("完了", 1);
     if (!kept.length) return { text: "", score: null };
     const meanScore = kept.reduce((a, k) => a + k.score, 0) / kept.length;
     return { text: kept.map((k) => k.text).join("\n"), score: meanScore };
+  }
+
+  // ---------------- Full-image recognition (detection + rec) ----------------
+  // 「全体を読み取る」: run DBNet to find every text box, then recognize each box
+  // through the crop pipeline above and join in reading order. If detection
+  // finds nothing, fall back to treating the whole image as one crop (never a
+  // dead end).
+  async function paddleRecognizeFull(src, mode, onStatus) {
+    const ort = window.ort;
+    const det = await getDet(onStatus);
+    if (onStatus) onStatus("文字領域を検出中…", 0.6);
+    const boxes = await detectTextBoxes(ort, det, src);
+    if (!boxes.length) return await paddleRecognizeCrop(src, mode, onStatus);
+    if (onStatus) onStatus("認識中…", 0.8);
+    const parts = [], scores = [];
+    for (const b of boxes) {
+      const r = await paddleRecognizeCrop(subCanvas(src, b), mode, onStatus, true);
+      if (r.text && r.text.trim()) { parts.push(r.text); if (r.score != null) scores.push(r.score); }
+    }
+    if (onStatus) onStatus("完了", 1);
+    return {
+      text: parts.join("\n"),
+      score: scores.length ? scores.reduce((a, s) => a + s, 0) / scores.length : null
+    };
   }
 
   // ---------------- Clipboard helpers ----------------
@@ -1396,7 +1379,7 @@ details.acc .hint{ margin-top:0; }
       const ocrFilteredText = ref("");      // post-word-filter (単語フィルタ)
       const wordFilterOn = ref(loadWordFilterPref());
       const ocrConf = ref(null);
-      const engineUsed = ref("");           // 'paddle' | 'tesseract'
+      const engineUsed = ref("");           // display label, e.g. "PaddleOCR (PP-OCRv4)"
       const progress = ref(0);
       const progStatus = ref("");
       const cropRect = ref({ x: 0.1, y: 0.35, w: 0.8, h: 0.3 });
@@ -1450,8 +1433,7 @@ details.acc .hint{ margin-top:0; }
 
       // Runs the 単語フィルタ (word filter) on freshly recognized text and
       // decides what the textarea shows. cleanedRawText is the text AFTER the
-      // existing per-engine confidence filters (Tesseract word-confidence /
-      // PaddleOCR score threshold) -- this function only adds the
+      // PaddleOCR per-word/line score threshold -- this function only adds the
       // dictionary+pattern token classifier on top of that.
       async function applyWordFilterAndFinish(cleanedRawText) {
         ocrRawText.value = cleanedRawText;
@@ -1478,9 +1460,11 @@ details.acc .hint{ margin-top:0; }
       }
 
       // ---- OCR pipeline ----
-      // Engine routing:
-      //   cropped 英数字 -> PaddleOCR PP-OCRv4 (rec-only), Tesseract fallback
-      //   everything else (full image, or 日本語) -> Tesseract
+      // Everything runs on PaddleOCR (ONNX Runtime Web):
+      //   cropped read  -> rec-only over the isolated region (eng or jpn model)
+      //   全体を読み取る -> DBNet detection + rec over each detected box
+      // If ORT or a model fails to load there is no Tesseract fallback anymore,
+      // so surface a clear Japanese error instead of a silent dead end.
       async function runOcr(useCrop) {
         captureErr.value = "";
         stage.value = "processing";
@@ -1488,72 +1472,28 @@ details.acc .hint{ margin-top:0; }
         ocrText.value = ""; ocrRawText.value = ""; ocrFilteredText.value = "";
         ocrConf.value = null; engineUsed.value = "";
         wordFilterOn.value = loadWordFilterPref();
+        const mode = ocrMode.value;
         try {
-          // Crop source: quad mode homography-warps to an upright rectangle
-          // (perspective already corrected); rect mode auto-deskews the crop.
-          let cropCanvas = null;
+          releaseOtherRec(mode); // bound memory: drop the inactive mode's rec model
+          let result;
           if (useCrop) {
-            if (cropMode.value === "quad" && quadCorners.value) {
-              cropCanvas = warpQuad(currentBitmap, quadCorners.value);
-            } else {
-              cropCanvas = maybeDeskew(cropFromBitmap(currentBitmap, cropRect.value));
-            }
+            // Crop source: quad mode homography-warps to an upright rectangle
+            // (perspective already corrected); rect mode auto-deskews the crop.
+            const cropCanvas = (cropMode.value === "quad" && quadCorners.value)
+              ? warpQuad(currentBitmap, quadCorners.value)
+              : maybeDeskew(cropFromBitmap(currentBitmap, cropRect.value));
+            result = await paddleRecognizeCrop(cropCanvas, mode, setStatus);
+          } else {
+            result = await paddleRecognizeFull(maybeDeskew(currentBitmap), mode, setStatus);
           }
-          const usePaddle = (ocrMode.value === "eng" && useCrop);
-
-          if (usePaddle) {
-            try {
-              await releaseTessWorker();
-              const { text, score } = await paddleRecognize(cropCanvas, setStatus);
-              engineUsed.value = "paddle";
-              ocrConf.value = score != null ? Math.round(score * 100) : null;
-              await applyWordFilterAndFinish(cleanText(text));
-              stage.value = "result";
-              return;
-            } catch (e) {
-              console.warn("PaddleOCR failed, falling back to Tesseract:", e);
-              // fall through to the Tesseract path on the same crop
-            }
-          }
-
-          // Tesseract path (full image, 日本語, or Paddle fallback)
-          releasePaddle();
-          const pre = useCrop ? preprocessCrop(cropCanvas)
-            : { canvas: preprocess(maybeDeskew(currentBitmap)), singleLine: false };
-          progress.value = 0.1; progStatus.value = "OCRエンジンを準備中…";
-          const worker = await getWorker(ocrMode.value, (m) => {
-            progStatus.value = mapStatus(m.status);
-            if (typeof m.progress === "number") progress.value = m.progress;
-          });
-          const params = {
-            tessedit_pageseg_mode: useCrop ? (pre.singleLine ? "7" : "6") : "3"
-          };
-          params.tessedit_char_whitelist = ocrMode.value === "eng"
-            ? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-./:()#"
-            : "";
-          // jpn (jpn+eng): keep the spaces the engine finds between words so a
-          // half-width digit run embedded between kanji (東京都千代田区 1-2-3)
-          // isn't glued to the surrounding CJK, and so the word filter can see
-          // the digit token as its own token.
-          if (ocrMode.value === "jpn") params.preserve_interword_spaces = "1";
-          await worker.setParameters(params);
-          progStatus.value = "認識中…";
-          const { data } = await worker.recognize(pre.canvas);
-          engineUsed.value = "tesseract";
-          const rawText = data && data.text ? data.text : "";
-          const filteredConf = filterLowConfWords(data);
-          // Never make results strictly worse: fall back to the raw text if
-          // filtering by word confidence removed everything (or couldn't run).
-          let cleanedResult = cleanText(filteredConf && filteredConf.trim() ? filteredConf : rawText);
-          // Fold full-width ASCII/digits/dashes to half-width in jpn mode
-          // (before the word filter) so stored addresses / model numbers read
-          // back in plain ASCII and digit tokens match the filter's rules.
-          if (ocrMode.value === "jpn") cleanedResult = normalizeWidth(cleanedResult);
-          ocrConf.value = data && typeof data.confidence === "number" ? Math.round(data.confidence) : null;
-          await applyWordFilterAndFinish(cleanedResult);
+          engineUsed.value = REC_CFG[mode] ? REC_CFG[mode].label : REC_CFG.eng.label;
+          ocrConf.value = result.score != null ? Math.round(result.score * 100) : null;
+          await applyWordFilterAndFinish(cleanText(result.text));
           stage.value = "result";
         } catch (e) {
-          captureErr.value = "文字認識に失敗しました: " + (e && e.message ? e.message : e);
+          console.warn("OCR failed:", e);
+          captureErr.value = "文字認識に失敗しました。通信環境をご確認のうえ、もう一度お試しください: "
+            + (e && e.message ? e.message : e);
           stage.value = currentBitmap ? "crop" : "input";
         }
       }
@@ -1871,7 +1811,7 @@ details.acc .hint{ margin-top:0; }
       }
 
       function renderResult() {
-        const engineName = engineUsed.value === "paddle" ? "PaddleOCR (PP-OCRv4)" : "Tesseract";
+        const engineName = engineUsed.value || "PaddleOCR";
         return h("div", {}, [
           captureErr.value ? h("div", { class: "err" }, captureErr.value) : null,
           h("div", { class: "card" }, [
@@ -1924,8 +1864,8 @@ details.acc .hint{ margin-top:0; }
             h("details", { class: "acc" }, [
               h("summary", {}, "このモードについて"),
               ocrMode.value === "eng"
-                ? h("div", { class: "hint" }, "英数字モードは、範囲を選んで読み取ると高精度エンジン PaddleOCR (PP-OCRv4) を使用します。初回の範囲読み取り時のみ、モデルとエンジン（合計 約22MB）をダウンロードします。「全体を読み取る」は Tesseract で処理します。")
-                : h("div", { class: "hint" }, "日本語モードは Tesseract（jpn+eng の複合モデル）を使用します。和文中の半角英数字（住所の 1-2-3 や型番）の精度を上げるため日本語と英数字の学習データを併用し、初回のみ言語データ（約5MB）をダウンロードするため、少し時間がかかります。")
+                ? h("div", { class: "hint" }, "英数字モードは PaddleOCR (PP-OCRv4) を使用します。「全体を読み取る」では文字検出（DBNet）で各行を見つけてから認識します。初回のみエンジンとモデル（合計 約22MB）をダウンロードします。")
+                : h("div", { class: "hint" }, "日本語モードは PaddleOCR（PP-OCRv3 japan の認識モデル）を使用します。和文に加え、住所の 1-2-3 や型番の半角英数字もそのまま読み取れます。初回のみエンジンとモデル（合計 約22MB）をダウンロードするため、少し時間がかかります。")
             ])
           ]),
           h("div", { class: "card" }, [

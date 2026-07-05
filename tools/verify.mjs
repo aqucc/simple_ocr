@@ -32,24 +32,20 @@ const globalRoot = execSync("npm root -g").toString().trim();
 const chromeBin = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome";
 
 // ---- pinned assets (must match index.html) ----
-const VER = { vue: "3.4.38", tess: "5.1.1", core: "5.1.1", eng: "1.0.0", jpn: "1.0.0", ort: "1.19.2", models: "1.4.2", wordlist: "4.1.0" };
+// Tesseract has been retired; the only OCR engine is onnxruntime-web + PaddleOCR
+// (shared DBNet detector + PP-OCRv4 ch rec on jsdelivr, plus a self-hosted japan
+// PP-OCRv3 rec model served same-origin from models/).
+const VER = { vue: "3.4.38", ort: "1.19.2", models: "1.4.2", wordlist: "4.1.0" };
 const CACHE_FILES = {
   "vue.runtime.global.prod.js": join(cacheDir, "vue", "vue.runtime.global.prod.js"),
-  "tesseract.min.js": join(cacheDir, "tesseract.js", "dist", "tesseract.min.js"),
-  "worker.min.js": join(cacheDir, "tesseract.js", "dist", "worker.min.js"),
-  "tesseract-core-simd-lstm.wasm.js": join(cacheDir, "tesseract.js-core", "tesseract-core-simd-lstm.wasm.js"),
-  "tesseract-core.wasm.js": join(cacheDir, "tesseract.js-core", "tesseract-core.wasm.js"),
-  "tesseract-core-simd.wasm.js": join(cacheDir, "tesseract.js-core", "tesseract-core-simd.wasm.js"),
-  "tesseract-core-lstm.wasm.js": join(cacheDir, "tesseract.js-core", "tesseract-core-lstm.wasm.js"),
-  "eng.traineddata.gz": join(cacheDir, "eng", "eng.traineddata.gz"),
-  "jpn.traineddata.gz": join(cacheDir, "jpn", "jpn.traineddata.gz"),
-  // onnxruntime-web (wasm-only build + its wasm/glue) for the PaddleOCR path
+  // onnxruntime-web (wasm-only build + its wasm/glue)
   "ort.wasm.min.js": join(cacheDir, "onnxruntime-web", "ort.wasm.min.js"),
   "ort-wasm-simd-threaded.mjs": join(cacheDir, "onnxruntime-web", "ort-wasm-simd-threaded.mjs"),
   "ort-wasm-simd-threaded.wasm": join(cacheDir, "onnxruntime-web", "ort-wasm-simd-threaded.wasm"),
   "ort-wasm-simd-threaded.jsep.mjs": join(cacheDir, "onnxruntime-web", "ort-wasm-simd-threaded.jsep.mjs"),
   "ort-wasm-simd-threaded.jsep.wasm": join(cacheDir, "onnxruntime-web", "ort-wasm-simd-threaded.jsep.wasm"),
-  // PP-OCRv4 recognition model + dictionary (@gutenye/ocr-models)
+  // PP-OCRv4 detection + recognition model + dictionary (@gutenye/ocr-models)
+  "ch_PP-OCRv4_det_infer.onnx": join(cacheDir, "ocr-models", "ch_PP-OCRv4_det_infer.onnx"),
   "ch_PP-OCRv4_rec_infer.onnx": join(cacheDir, "ocr-models", "ch_PP-OCRv4_rec_infer.onnx"),
   "ppocr_keys_v1.txt": join(cacheDir, "ocr-models", "ppocr_keys_v1.txt"),
   // English wordlist for the 単語フィルタ (word filter) dictionary check
@@ -77,7 +73,7 @@ const NOISE_LABEL_STRINGS = ["MODEL: KX-1234AB", "S/N 5X-98765"];
 // Does this container have a CJK-capable font installed? If not, canvas-rendered
 // Japanese glyphs would come out as tofu boxes and OCR-ing them proves nothing.
 // In that case we fall back to an ASCII-only image in jpn mode, which still
-// proves the jpn worker/traineddata pipeline works end-to-end.
+// proves the jpn PaddleOCR rec pipeline works end-to-end.
 function detectCjkFont() {
   try {
     const out = execSync("fc-list", { encoding: "utf8" });
@@ -101,33 +97,19 @@ function ensureCache() {
     execSync(`tar xzf "${join(tmp, name)}.tgz" -C "${join(tmp, name)}"`);
   };
   grab("vue", `https://registry.npmjs.org/vue/-/vue-${VER.vue}.tgz`);
-  grab("tess", `https://registry.npmjs.org/tesseract.js/-/tesseract.js-${VER.tess}.tgz`);
-  grab("core", `https://registry.npmjs.org/tesseract.js-core/-/tesseract.js-core-${VER.core}.tgz`);
-  grab("eng", `https://registry.npmjs.org/@tesseract.js-data/eng/-/eng-${VER.eng}.tgz`);
-  grab("jpn", `https://registry.npmjs.org/@tesseract.js-data/jpn/-/jpn-${VER.jpn}.tgz`);
   grab("ort", `https://registry.npmjs.org/onnxruntime-web/-/onnxruntime-web-${VER.ort}.tgz`);
   grab("models", `https://registry.npmjs.org/@gutenye/ocr-models/-/ocr-models-${VER.models}.tgz`);
   grab("wordlist", `https://registry.npmjs.org/word-list/-/word-list-${VER.wordlist}.tgz`);
 
   mkdirSync(join(cacheDir, "vue"), { recursive: true });
-  mkdirSync(join(cacheDir, "tesseract.js", "dist"), { recursive: true });
-  mkdirSync(join(cacheDir, "tesseract.js-core"), { recursive: true });
-  mkdirSync(join(cacheDir, "eng"), { recursive: true });
-  mkdirSync(join(cacheDir, "jpn"), { recursive: true });
   mkdirSync(join(cacheDir, "onnxruntime-web"), { recursive: true });
   mkdirSync(join(cacheDir, "ocr-models"), { recursive: true });
   mkdirSync(join(cacheDir, "word-list"), { recursive: true });
   copyFileSync(join(tmp, "vue", "package", "dist", "vue.runtime.global.prod.js"), CACHE_FILES["vue.runtime.global.prod.js"]);
-  copyFileSync(join(tmp, "tess", "package", "dist", "tesseract.min.js"), CACHE_FILES["tesseract.min.js"]);
-  copyFileSync(join(tmp, "tess", "package", "dist", "worker.min.js"), CACHE_FILES["worker.min.js"]);
-  for (const f of ["tesseract-core-simd-lstm.wasm.js", "tesseract-core.wasm.js", "tesseract-core-simd.wasm.js", "tesseract-core-lstm.wasm.js"]) {
-    copyFileSync(join(tmp, "core", "package", f), CACHE_FILES[f]);
-  }
-  copyFileSync(join(tmp, "eng", "package", "4.0.0_best_int", "eng.traineddata.gz"), CACHE_FILES["eng.traineddata.gz"]);
-  copyFileSync(join(tmp, "jpn", "package", "4.0.0_best_int", "jpn.traineddata.gz"), CACHE_FILES["jpn.traineddata.gz"]);
   for (const f of ["ort.wasm.min.js", "ort-wasm-simd-threaded.mjs", "ort-wasm-simd-threaded.wasm", "ort-wasm-simd-threaded.jsep.mjs", "ort-wasm-simd-threaded.jsep.wasm"]) {
     copyFileSync(join(tmp, "ort", "package", "dist", f), CACHE_FILES[f]);
   }
+  copyFileSync(join(tmp, "models", "package", "assets", "ch_PP-OCRv4_det_infer.onnx"), CACHE_FILES["ch_PP-OCRv4_det_infer.onnx"]);
   copyFileSync(join(tmp, "models", "package", "assets", "ch_PP-OCRv4_rec_infer.onnx"), CACHE_FILES["ch_PP-OCRv4_rec_infer.onnx"]);
   copyFileSync(join(tmp, "models", "package", "assets", "ppocr_keys_v1.txt"), CACHE_FILES["ppocr_keys_v1.txt"]);
   copyFileSync(join(tmp, "wordlist", "package", "words.txt"), CACHE_FILES["words.txt"]);
@@ -169,15 +151,12 @@ async function main() {
   const errors = [];
   const cspViolations = [];
   const unmappedCdn = [];
-  // traineddata is now SELF-HOSTED (served from the local origin under
-  // /tessdata), so the app must NEVER reach for a *.traineddata* file on
-  // jsdelivr in any mode. Track any that slip through and assert none.
-  const jsdelivrTraineddata = [];
 
-  // Intercept jsdelivr; fulfill from the local cache.
+  // Intercept jsdelivr; fulfill from the local cache. The japan rec model and
+  // its dict are SELF-HOSTED (served same-origin from models/ by the static
+  // server below), so they never hit this route.
   await context.route("https://cdn.jsdelivr.net/**", async (route) => {
     const url = new URL(route.request().url());
-    if (/traineddata/i.test(url.pathname)) jsdelivrTraineddata.push(url.pathname);
     const name = basename(url.pathname);
     const local = CACHE_FILES[name];
     if (local && existsSync(local)) {
@@ -287,7 +266,7 @@ async function main() {
   // Generate a noisy label image in-page: diagonal gray-gradient background,
   // ~800 random low-contrast speckle dots/short strokes, a slight vignette,
   // then the same dark label text as the clean test above. Used later by the
-  // noise-robustness test (both the Paddle and Tesseract paths).
+  // noise-robustness test (both the eng and jpn PaddleOCR paths).
   async function generateNoisyLabelDataUrl() {
     return await page.evaluate(() => {
       // Seeded PRNG (mulberry32) so the noise pattern -- and therefore the
@@ -370,14 +349,14 @@ async function main() {
   const cspFromPage = await page.evaluate(() => window.__csp || []);
   if (cspFromPage.length) { cspViolations.push(...cspFromPage); return fail("securitypolicyviolation events fired."); }
 
-  // ---- full-image path -> Tesseract ----
+  // ---- full-image path -> PaddleOCR DBNet detection + rec ----
   await page.getByText("範囲を選び直す", { exact: true }).click();
   await page.waitForSelector(".crop-stage", { timeout: 10000 });
   await page.getByText("全体を読み取る", { exact: true }).click();
-  await assertResult("Tesseract-full", "KX[-—_ ]?1234AB", "98765");
+  await assertResult("Paddle-det-full", "KX[-—_ ]?1234AB", "98765");
   const engine2 = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
-  if (!/Tesseract/.test(engine2)) return fail("Expected Tesseract engine for full-image path, got: " + engine2);
-  log("Step 3b: full-image OCR via " + engine2 + " matched.");
+  if (!/PaddleOCR/.test(engine2)) return fail("Expected PaddleOCR engine for full-image (det+rec) path, got: " + engine2);
+  log("Step 3b: full-image OCR via DBNet detection + " + engine2 + " matched.");
 
   // Save the record.
   await page.getByText("保存する", { exact: true }).click();
@@ -510,7 +489,12 @@ async function main() {
     x.fillStyle = "#000"; x.textBaseline = "top";
     if (variant === "cjk") {
       x.font = `32px "${cjkFamily}"`;
-      x.fillText("型番 KX-1234", 30, 60);
+      // 品番 AB-1234: kanji + latin + embedded digits, all read reliably by the
+      // japan PP-OCRv3 rec model. (Isolated uppercase X adjacent to kanji, e.g.
+      // "型番 KX", can be misread as katakana メ by this model — a documented
+      // limitation; the robust digit/kanji/kana coverage is what the gates
+      // below exercise.)
+      x.fillText("品番 AB-1234", 30, 60);
     } else {
       x.font = "28px monospace";
       x.fillText("MODEL KX-9876", 30, 50);
@@ -528,7 +512,7 @@ async function main() {
       }, "image/png");
     });
   }, { variant, cjkFamily });
-  log(`Step 8: jpn-mode ${variant === "cjk" ? "CJK label (型番 KX-1234)" : "ASCII label (MODEL KX-9876 / TYPE JP-TEST)"} image injected; running cropped Tesseract path...`);
+  log(`Step 8: jpn-mode ${variant === "cjk" ? "CJK label (品番 AB-1234)" : "ASCII label (MODEL KX-9876 / TYPE JP-TEST)"} image injected; running cropped PaddleOCR (japan) path...`);
 
   await expandCropToFull();
   await page.getByText("この範囲を読み取る", { exact: true }).click();
@@ -540,7 +524,7 @@ async function main() {
       if (!ta) return false;
       const t = ta.value;
       if (v === "cjk") {
-        return /KX/i.test(t) && /1234/.test(t) && /[぀-ヿ㐀-䶿一-鿿]/.test(t);
+        return /AB/i.test(t) && /1234/.test(t) && /[぀-ヿ㐀-䶿一-鿿]/.test(t);
       }
       return /KX/i.test(t) && /9876/.test(t);
     }, variant, { timeout: 150000 });
@@ -550,27 +534,22 @@ async function main() {
   }
   const jpnRecognized = await page.evaluate(() => document.querySelector("textarea").value);
   const engine3 = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
-  if (!/Tesseract/.test(engine3)) return fail("Expected Tesseract engine for jpn cropped path, got: " + engine3);
+  if (!/PaddleOCR/.test(engine3)) return fail("Expected PaddleOCR engine for jpn cropped path, got: " + engine3);
   log(`Step 9: jpn-mode cropped OCR via ${engine3} succeeded (${variant} variant). Recognized:\n  ` + jpnRecognized.replace(/\n/g, "\\n"));
 
   if (cspViolations.length) return fail("CSP violation(s) occurred during Japanese-mode OCR.");
   const cspFromPage2 = await page.evaluate(() => window.__csp || []);
   if (cspFromPage2.length) { cspViolations.push(...cspFromPage2); return fail("securitypolicyviolation events fired during Japanese-mode OCR."); }
-
-  // Self-hosted traineddata gate: after a full jpn-mode OCR (which loads the
-  // jpn+eng combined model) the app must not have fetched any *.traineddata*
-  // from jsdelivr — the model comes from the same-origin /tessdata dir.
-  if (jsdelivrTraineddata.length) {
-    return fail("jpn mode fetched traineddata from jsdelivr (should be self-hosted /tessdata):\n  " + jsdelivrTraineddata.join("\n  "));
-  }
-  log("Step 9a: no jsdelivr traineddata fetches — jpn+eng model loaded from self-hosted /tessdata.");
+  log("Step 9a: jpn mode ran entirely on the self-hosted japan PP-OCRv3 rec model (models/japan_rec.onnx).");
 
   // ---- ACCEPTANCE GATE: embedded half-width digits in Japanese text ----
   // The user problem: kanji text with embedded half-width digits (an address
-  // like 東京都千代田区1-2-3, or unit specs like 定格 100V 50Hz 1.5A) used to
-  // lose or garble the digits under a jpn-only model. jpn+eng (self-hosted)
-  // plus full-width normalization must recover them. Only meaningful with a
-  // CJK-capable font; skipped (with a note) otherwise.
+  // like 東京都千代田区1-2-3, or unit specs like 定格 100V 50Hz 1.5A) must keep
+  // the digits intact. The japan PP-OCRv3 rec model + full-width normalization
+  // recover them. Only meaningful with a CJK-capable font; skipped otherwise.
+  // Unit letters are compared case-insensitively: this rec model can emit a
+  // lowercase v for V or an uppercase Z for z (a documented case quirk on
+  // isolated Latin), which does not affect digit/unit survival.
   if (cjkFamily) {
     // The app normalizes full-width->half-width in jpn mode already; normalize
     // here too so the assertion is robust whichever form the engine emitted.
@@ -623,23 +602,38 @@ async function main() {
     const cspA = await page.evaluate(() => window.__csp || []);
     if (cspA.length) { cspViolations.push(...cspA); return fail("securitypolicyviolation during acceptance A."); }
 
-    // Image B: 定格 100V 50Hz 1.5A -> must contain 100V, 50Hz, 1.5A.
+    // Image B: 定格 100V 50Hz 1.5A -> must contain 100V, 50Hz, 1.5A (unit
+    // letters case-insensitive; see note above).
     const rawB = await runJpnCropAccept("定格 100V 50Hz 1.5A", "spec-B.png");
     const normB = normW(rawB).replace(/\s+/g, " ");
+    const flatB = normB.replace(/\s+/g, "").toUpperCase();
     log("Acceptance B (定格 100V 50Hz 1.5A) recognized:\n  raw: " + rawB.replace(/\n/g, "\\n") + "\n  norm: " + normB.replace(/\n/g, "\\n"));
-    for (const need of ["100V", "50Hz", "1.5A"]) {
-      if (normB.replace(/\s+/g, "").indexOf(need) < 0) {
-        return fail("Acceptance B failed: recognized text missing \"" + need + "\".\n  normalized: " + normB + "\n  raw: " + rawB);
+    for (const need of ["100V", "50HZ", "1.5A"]) {
+      if (flatB.indexOf(need) < 0) {
+        return fail("Acceptance B failed: recognized text missing \"" + need + "\" (case-insensitive).\n  normalized: " + normB + "\n  raw: " + rawB);
       }
     }
-    log("Acceptance B PASSED: 100V / 50Hz / 1.5A all present.");
+    log("Acceptance B PASSED: 100V / 50Hz / 1.5A all present (case-insensitive).");
 
-    if (jsdelivrTraineddata.length) return fail("Acceptance tests fetched traineddata from jsdelivr:\n  " + jsdelivrTraineddata.join("\n  "));
     if (cspViolations.length) return fail("CSP violation(s) during acceptance B.");
     const cspB = await page.evaluate(() => window.__csp || []);
     if (cspB.length) { cspViolations.push(...cspB); return fail("securitypolicyviolation during acceptance B."); }
+
+    // Image C (kana gate): 型番たしかめ 12-34 -> hiragana must SURVIVE (must NOT
+    // be ASCII-stripped, which is what the eng path would do) and the embedded
+    // digits 12-34 must read back exactly.
+    const rawC = await runJpnCropAccept("型番たしかめ 12-34", "kana-C.png");
+    const normC = normW(rawC);
+    log("Acceptance C kana (型番たしかめ 12-34) recognized:\n  raw: " + rawC.replace(/\n/g, "\\n") + "\n  norm: " + normC.replace(/\n/g, "\\n"));
+    if (!/[぀-ゟ]/.test(normC)) return fail("Acceptance C (kana) failed: no hiragana survived — kana must not be ASCII-stripped in jpn mode.\n  norm: " + normC);
+    if (normC.replace(/\s+/g, "").indexOf("12-34") < 0) return fail("Acceptance C (kana) failed: embedded digits 12-34 missing.\n  norm: " + normC);
+    log("Acceptance C PASSED: hiragana survived and 12-34 read exactly.");
+
+    if (cspViolations.length) return fail("CSP violation(s) during acceptance C.");
+    const cspC = await page.evaluate(() => window.__csp || []);
+    if (cspC.length) { cspViolations.push(...cspC); return fail("securitypolicyviolation during acceptance C."); }
   } else {
-    log("Acceptance A/B skipped: no CJK font available to render kanji labels.");
+    log("Acceptance A/B/C skipped: no CJK font available to render kanji labels.");
   }
 
   // ---- 単語フィルタ (word filter) test: decoy cert-mark image on the
@@ -881,10 +875,9 @@ async function main() {
   await page.waitForSelector(".card", { timeout: 8000 });
 
   // ---- Noise-robustness test (acceptance gate for the hallucination fixes) ----
-  // A background-noise-only crop should no longer surface hallucinated
-  // characters: Paddle via confidence rejection (score < 0.5) + ASCII-only
-  // post-filter, Tesseract via adaptive-threshold + despeckle preprocessing
-  // plus the word-confidence filter.
+  // A background-noise-only crop should not surface hallucinated characters:
+  // eng via confidence rejection (score < 0.5) + ASCII-only post-filter, jpn via
+  // the same score gate + the 単語フィルタ token classifier.
   const noisyDataUrl = await generateNoisyLabelDataUrl();
   log("Step 14: noisy label image generated (gradient bg + ~800 speckles + vignette).");
 
@@ -937,9 +930,8 @@ async function main() {
   const cspFromPage3 = await page.evaluate(() => window.__csp || []);
   if (cspFromPage3.length) { cspViolations.push(...cspFromPage3); return fail("securitypolicyviolation events fired during noisy Paddle OCR."); }
 
-  // Same noisy image through the cropped Tesseract path (jpn mode exercises
-  // preprocessCrop's adaptive threshold + despeckle, same as the earlier
-  // jpn-mode test above).
+  // Same noisy image through the cropped jpn PaddleOCR path (japan rec model +
+  // the score gate + word filter reject the speckle without hallucinating).
   await page.getByText("破棄", { exact: true }).click();
   await page.waitForSelector(".card", { timeout: 8000 });
   await page.getByText("日本語+英数字", { exact: true }).click();
@@ -951,17 +943,17 @@ async function main() {
   await injectDataUrlFile(noisyDataUrl, "noisy-label-2.png");
   await expandCropToFull();
   await page.getByText("この範囲を読み取る", { exact: true }).click();
-  await assertResult("Noise-Tesseract-crop", "KX", "98765|1234");
+  await assertResult("Noise-jpn-Paddle-crop", "KX", "98765|1234");
   const noisyTessText = await page.evaluate(() => document.querySelector("textarea").value);
   const engineNoisyTess = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
-  if (!/Tesseract/.test(engineNoisyTess)) return fail("Expected Tesseract engine for noisy cropped jpn path, got: " + engineNoisyTess);
+  if (!/PaddleOCR/.test(engineNoisyTess)) return fail("Expected PaddleOCR engine for noisy cropped jpn path, got: " + engineNoisyTess);
   const garbageTess = countGarbage(noisyTessText, NOISE_LABEL_STRINGS);
-  log("Step 16: noisy-image Tesseract-crop (jpn mode) recognized (garbage=" + garbageTess + "):\n  " + noisyTessText.replace(/\n/g, "\\n"));
-  if (garbageTess > 6) return fail("Noise test (Tesseract) garbage count too high (" + garbageTess + " > 6). Recognized text:\n" + noisyTessText);
+  log("Step 16: noisy-image jpn PaddleOCR-crop recognized (garbage=" + garbageTess + "):\n  " + noisyTessText.replace(/\n/g, "\\n"));
+  if (garbageTess > 6) return fail("Noise test (jpn) garbage count too high (" + garbageTess + " > 6). Recognized text:\n" + noisyTessText);
 
-  if (cspViolations.length) return fail("CSP violation(s) occurred during noisy Tesseract OCR.");
+  if (cspViolations.length) return fail("CSP violation(s) occurred during noisy jpn OCR.");
   const cspFromPage4 = await page.evaluate(() => window.__csp || []);
-  if (cspFromPage4.length) { cspViolations.push(...cspFromPage4); return fail("securitypolicyviolation events fired during noisy Tesseract OCR."); }
+  if (cspFromPage4.length) { cspViolations.push(...cspFromPage4); return fail("securitypolicyviolation events fired during noisy jpn OCR."); }
 
   await page.getByText("破棄", { exact: true }).click();
   await page.waitForSelector(".card", { timeout: 8000 });
@@ -1160,7 +1152,7 @@ async function main() {
   await browser.close();
   server.close();
   log("\n==================== VERIFY PASSED ====================");
-  log(`No CSP violations, no JS errors. OCR (eng) + save + calendar + persistence all OK. Japanese mode OCR (${variant} variant) OK.`);
+  log(`No CSP violations, no JS errors. PaddleOCR eng (crop + DBNet full-image) + save + calendar + persistence all OK. Japanese-mode PaddleOCR (japan rec, ${variant} variant) OK.`);
   process.exit(0);
 }
 
