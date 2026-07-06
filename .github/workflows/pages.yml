@@ -35,6 +35,9 @@ jobs:
           mkdir _site
           cp index.html _site/
           cp -r models _site/models
+          # デプロイ版のみバージョンを埋め込む（インラインscript/styleの中身は
+          # 変更しないので CSP の sha256 ハッシュには影響しない）
+          sed -i "s|<title>|<meta name=\"app-version\" content=\"${GITHUB_SHA:0:7}\"><title>|" _site/index.html
 
       - uses: actions/upload-pages-artifact@v3
         with:

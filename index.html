@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-y6T9BMT/WZO5LmWpT92MYqtpcToH4ihHzXriGciYifE=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-75l7J2Hvvw6MK4RsGMyIQi/a9GhqV6uFi4eAv9xR/Xc='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-s7Fg7SgNY1jFRF0InN+f4Gy6Fjw6phH6zugv5JwwcCs=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-Y2v4cKGX8NoNcNAZvNMQ/9GtlwRL1+a0tp7zQjHlJOw='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
 <title>ラベルOCR</title>
 <style>
 :root{
@@ -22,6 +22,7 @@ header{ position:sticky; top:0; z-index:10; background:var(--panel);
   border-bottom:1px solid var(--line);
   padding:calc(env(safe-area-inset-top) + 8px) 12px 8px; }
 header h1{ font-size:17px; margin:0 0 8px; text-align:center; font-weight:700; }
+header h1 .ver{ font-size:10px; font-weight:400; color:var(--muted); margin-left:6px; vertical-align:middle; }
 .nav{ display:flex; gap:8px; }
 .nav button{ flex:1; min-height:44px; border:1px solid var(--line); background:var(--panel2);
   color:var(--fg); border-radius:10px; font-size:15px; font-weight:600; }
@@ -155,6 +156,14 @@ details.acc .hint{ margin-top:0; }
 <script>
 "use strict";
 (function () {
+  // Deploy version: the Pages workflow injects <meta name="app-version"> with
+  // the commit SHA at staging time (the repo file itself has no such meta, so
+  // local/dev shows "dev"). Lets the user see at a glance whether the browser
+  // is serving a stale cached build.
+  const APP_VERSION = (() => {
+    const m = document.querySelector('meta[name="app-version"]');
+    return (m && m.content) ? m.content : "dev";
+  })();
   const { createApp, h, ref, computed, onMounted } = Vue;
 
   const LANG_MODE_KEY = "label_ocr_lang_mode";
@@ -1980,7 +1989,7 @@ details.acc .hint{ margin-top:0; }
 
       return () => h("div", {}, [
         h("header", {}, [
-          h("h1", {}, "ラベルOCR"),
+          h("h1", {}, ["ラベルOCR", h("span", { class: "ver" }, APP_VERSION)]),
           h("div", { class: "nav" }, [
             h("button", { class: view.value === "capture" ? "active" : "", onClick: () => { view.value = "capture"; } }, "撮影"),
             h("button", { class: view.value === "list" ? "active" : "", onClick: () => { view.value = "list"; refreshRecords(); } }, "一覧")
