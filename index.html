@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-rnAZMaDsEHxWTaBZ8P8OWOHvTCGbcNy8829UCKmEguI=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-Y2v4cKGX8NoNcNAZvNMQ/9GtlwRL1+a0tp7zQjHlJOw='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-LQUoHaOeDqkV/0d3oJ1i/GQl/51ea4Oyp9xR0togMeg=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-Y2v4cKGX8NoNcNAZvNMQ/9GtlwRL1+a0tp7zQjHlJOw='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
 <title>ラベルOCR</title>
 <style>
 :root{
@@ -1342,8 +1342,8 @@ details.acc .hint{ margin-top:0; }
   // finds nothing, fall back to treating the whole image as one crop (never a
   // dead end).
   async function paddleRecognizeFull(src, mode, onStatus) {
+    const det = await getDet(onStatus); // loads ORT (sets window.ort) if not yet ready
     const ort = window.ort;
-    const det = await getDet(onStatus);
     if (onStatus) onStatus("文字領域を検出中…", 0.6);
     const boxes = await detectTextBoxes(ort, det, src);
     if (!boxes.length) return await paddleRecognizeCrop(src, mode, onStatus);

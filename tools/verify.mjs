@@ -469,7 +469,17 @@ async function main() {
   await page.waitForSelector(".crop-stage", { timeout: 10000 });
   if (!(await blockMethodActive())) return fail("Full-image method toggle did not persist across reload (ブロック解析 not active).");
   log("Step 3c: full-image method toggle persisted across reload (localStorage).");
-  await page.getByText("従来", { exact: true }).click(); // restore default for downstream
+
+  // Regression guard: classic 全体を読み取る as the FIRST OCR after a cold reload
+  // (window.ort not yet warmed). paddleRecognizeFull must load ORT via getDet
+  // BEFORE reading window.ort; otherwise this crashes with "Cannot read
+  // properties of undefined (reading 'Tensor')".
+  await page.getByText("従来", { exact: true }).click();
+  await page.getByText("全体を読み取る", { exact: true }).click();
+  await assertResult("classic-full-cold-start", "KX[-—_ ]?1234AB", "98765");
+  log("Step 3d: classic full-image read works as the first OCR after reload (cold ORT).");
+  await page.getByText("範囲を選び直す", { exact: true }).click();
+  await page.waitForSelector(".crop-stage", { timeout: 10000 });
   await expandCropToFull();
   await page.getByText("この範囲を読み取る", { exact: true }).click();
   await assertResult("Paddle-crop-postreload", "KX[-—_ ]?1234AB", "98765");
