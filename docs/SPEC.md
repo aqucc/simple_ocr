@@ -1,10 +1,16 @@
-# 技術仕様書
+<div align="center">
 
-ラベルOCR（`index.html`）の内部仕様。使い方・概要は [../README.md](../README.md)、開発経緯は [CHANGELOG.md](./CHANGELOG.md) を参照。
+# 技術仕様
 
-- 実装は単一の `index.html`（Vue 3 ランタイム限定・`h()` render 関数のみ・テンプレート不使用）。
-- OCR は **PaddleOCR + ONNX Runtime Web に一本化**（Tesseract.js は廃止済み）。
-- サーバーへ画像を送信せず、すべてブラウザ内で処理。保存は IndexedDB。
+`index.html` の内部仕様。使い方は [README](../README.md)、経緯は [CHANGELOG](./CHANGELOG.md)。
+
+</div>
+
+---
+
+単一の `index.html`（Vue 3 ランタイム限定・`h()` render 関数のみ・テンプレート不使用）で完結。OCR は **PaddleOCR + ONNX Runtime Web** に一本化（Tesseract.js は廃止）。画像はサーバーへ送らず、保存は IndexedDB。
+
+**目次** — [エンジン構成](#エンジン構成) ・ [文字検出](#文字検出dbnet--pp-ocrv4-detopencv-なし) ・ [前処理](#前処理canvas) ・ [ノイズ除去](#ノイズ除去) ・ [CSP](#セキュリティcsp) ・ [依存](#依存固定バージョン) ・ [検証](#検証自動テスト) ・ [既知の制限](#既知の制限)
 
 ## エンジン構成
 
