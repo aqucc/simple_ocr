@@ -551,28 +551,51 @@ async function main() {
   if (!dayNav.allDisabled) return fail("Day view prev/next-day nav missing or not disabled at the only record-day (buttons=" + dayNav.count + ").");
   log("Step 4: after 保存, landed on the day view showing today's record (" + todayHdrDay + "); 前の日/次の日 disabled at the single record-day.");
 
-  // Header タブは「カレンダー」。押すとカレンダーのみ画面へ(戻るボタンは廃止)。
-  await page.getByText("カレンダー", { exact: true }).click();
-  await page.waitForSelector(".cal", { timeout: 8000 });
+  // Header タブは「カレンダー」。押すとカレンダー画面へ(戻るボタンは廃止)。
+  // (day view has both the header tab and the view toggle labelled カレンダー,
+  // so scope this click to the header.)
+  await page.locator("header").getByText("カレンダー", { exact: true }).click();
+  await page.waitForSelector(".calgrid", { timeout: 8000 });
   const badge = await page.evaluate(() => !!document.querySelector(".calcell.has .caldot"));
   if (!badge) return fail("Calendar badge (.caldot) not shown for a day with records.");
-  log("Step 4a: 「カレンダー」タブでカレンダーのみ画面＋日バッジを表示。");
-  // SE2 gate: the calendar must be fully visible without scrolling (records
-  // below/behind it are allowed to scroll in day/all views).
-  await checkSE2("calendar", "main", "cal");
+  log("Step 4a: 「カレンダー」タブでカレンダー画面＋日バッジを表示。");
+  // SE2 gate: the calendar screen must fit without scrolling.
+  await checkSE2("calendar", "main");
 
-  // List-mode transitions: カレンダー → 日選択(day) → この月の記録(month) → カレンダータブ.
-  await openDayWithRecords();                                   // tap the day -> day view
-  await page.getByText("この月の記録", { exact: true }).click();
-  await page.waitForSelector(".rec .txt", { timeout: 8000 });
-  const monthViewOk = await page.evaluate(() =>
-    [...document.querySelectorAll(".rec .txt")].some((e) => /KX/i.test(e.textContent)) &&
-    !!document.querySelector(".monthhdr") &&                    // month header present
-    !document.querySelector(".cal"));                          // month list shows records, no calendar
-  if (!monthViewOk) return fail("「この月の記録」view did not show the month's records with a month header and no calendar.");
-  await page.getByText("カレンダー", { exact: true }).click();   // header tab -> calendar
-  await page.waitForSelector(".cal", { timeout: 8000 });
-  log("Step 4b: 一覧のモード遷移 (カレンダー→日→この月の記録→カレンダータブ) OK。");
+  // ---- List-mode transitions via the [カレンダー | 月単位 | 日単位] toggle ----
+  // calendar -> 月単位 (month list).
+  await page.locator(".viewtoggle").getByText("月単位", { exact: true }).click();
+  await page.waitForSelector(".datehdr-link", { timeout: 8000 });
+  const monthOk = await page.evaluate(() =>
+    !!document.querySelector(".datehdr-link") &&
+    !document.querySelector(".calgrid") &&
+    [...document.querySelectorAll(".rec .txt")].some((e) => /KX/i.test(e.textContent)));
+  if (!monthOk) return fail("月単位 view: missing tappable date header / records, or still shows the calendar grid.");
+  // 月単位 has its own month nav (← 前の月 / 次の月 →): the year-month label changes.
+  const mlabel0 = (await page.locator(".navrow .navlabel").textContent()).trim();
+  await page.locator(".navrow .navbtn").last().click();        // 次の月 →
+  const mlabel1 = (await page.locator(".navrow .navlabel").textContent()).trim();
+  if (mlabel1 === mlabel0) return fail("月単位 の月移動で年月ラベルが変化しない (" + mlabel0 + ").");
+  await page.locator(".navrow .navbtn").first().click();       // ← 前の月 (back)
+  await page.waitForSelector(".datehdr-link", { timeout: 8000 });
+  // 月単位 -> 日単位 by tapping a date header.
+  await page.locator(".datehdr-link").first().click();
+  await page.waitForFunction(() => !document.querySelector(".datehdr-link") && !!document.querySelector(".rec .txt"), null, { timeout: 8000 });
+  const dayFromMonth = await page.evaluate(() => {
+    const nav = document.querySelector(".navrow .navlabel");
+    return !!nav && /日/.test(nav.textContent) && !document.querySelector(".calgrid");
+  });
+  if (!dayFromMonth) return fail("月単位の日付見出しタップで日単位ビューに入れない。");
+  // 日単位 -> カレンダー (toggle).
+  await page.locator(".viewtoggle").getByText("カレンダー", { exact: true }).click();
+  await page.waitForSelector(".calgrid", { timeout: 8000 });
+  // カレンダー -> 日単位 (toggle).
+  await page.locator(".viewtoggle").getByText("日単位", { exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector(".calgrid") && !!document.querySelector(".rec .txt"), null, { timeout: 8000 });
+  // Back to calendar for the following steps.
+  await page.locator(".viewtoggle").getByText("カレンダー", { exact: true }).click();
+  await page.waitForSelector(".calgrid", { timeout: 8000 });
+  log("Step 4b: カレンダー↔月単位↔日単位 の相互遷移＋月/日ナビを確認。");
 
   // Reload -> persistence. Entering 一覧 shows the calendar; open the day.
   await page.reload({ waitUntil: "load" });
