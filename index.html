@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-MxGtTQvqEXgSWuSOp92imlRwrIj9myoCHaRegxS6Rdg=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-Y2v4cKGX8NoNcNAZvNMQ/9GtlwRL1+a0tp7zQjHlJOw='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-fMbt9uhvfZoETonhub8dm0KXsiY1QWSKNNgFjgfL4kM=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-Y2v4cKGX8NoNcNAZvNMQ/9GtlwRL1+a0tp7zQjHlJOw='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
 <title>ラベルOCR</title>
 <style>
 :root{
@@ -1361,7 +1361,14 @@ details.acc .hint{ margin-top:0; }
   // ========================================================
   const App = {
     setup() {
-      const view = ref("capture");          // 'capture' | 'list'
+      // 'capture' = 撮影タブ(入力), 'ocr' = 認識機能(範囲選択→認識→結果、独立フロー、
+      // メインタブとしては見せない), 'list' = 一覧タブ。
+      const view = ref("capture");
+      // 認識機能をどこから開いたか。'capture'=新規撮影(保存で新規レコード)、
+      // 'list'=一覧からの再認識(保存で ocrTargetRec を上書き)。キャンセル先も
+      // これで決まる(capture→撮影に破棄、list→一覧に戻る)。
+      const ocrOrigin = ref("capture");
+      const ocrTargetRec = ref(null);       // 再認識で上書きする対象レコード
       const toast = ref("");
       let toastTimer = null;
       function showToast(msg) {
@@ -1428,7 +1435,9 @@ details.acc .hint{ margin-top:0; }
           cropMode.value = "rect"; quadCorners.value = null;
           ocrText.value = ""; ocrRawText.value = ""; ocrFilteredText.value = "";
           ocrConf.value = null; engineUsed.value = "";
+          // 撮影/選択/貼り付け→認識機能へ必ず遷移(範囲選択から)。
           stage.value = "crop";
+          view.value = "ocr";
         } catch (e) {
           captureErr.value = "画像の読み込みに失敗しました: " + (e && e.message ? e.message : e);
           stage.value = "input";
@@ -1507,10 +1516,17 @@ details.acc .hint{ margin-top:0; }
         }
       }
 
+      // Start a fresh recognition session (新規撮影): save will create a new
+      // calendar record. Used by camera/file/clipboard entry points.
+      function beginCaptureSession() {
+        ocrOrigin.value = "capture";
+        ocrTargetRec.value = null;
+      }
+
       function onFileInput(ev) {
         const f = ev.target.files && ev.target.files[0];
         ev.target.value = "";
-        if (f) handleBlob(f);
+        if (f) { beginCaptureSession(); handleBlob(f); }
       }
 
       async function pasteFromClipboard() {
@@ -1523,7 +1539,7 @@ details.acc .hint{ margin-top:0; }
           const items = await navigator.clipboard.read();
           for (const it of items) {
             const type = it.types.find((t) => t.indexOf("image") === 0);
-            if (type) { const blob = await it.getType(type); await handleBlob(blob); return; }
+            if (type) { const blob = await it.getType(type); beginCaptureSession(); await handleBlob(blob); return; }
           }
           captureErr.value = "クリップボードに画像が見つかりませんでした。";
         } catch (e) {
@@ -1537,7 +1553,7 @@ details.acc .hint{ margin-top:0; }
         for (const it of items) {
           if (it.kind === "file" && it.type.indexOf("image") === 0) {
             const blob = it.getAsFile();
-            if (blob) { ev.preventDefault(); handleBlob(blob); return; }
+            if (blob) { ev.preventDefault(); beginCaptureSession(); handleBlob(blob); return; }
           }
         }
       }
@@ -1625,32 +1641,49 @@ details.acc .hint{ margin-top:0; }
 
       async function saveRecord() {
         try {
-          const now = new Date();
-          const rec = {
-            id: (now.getTime() + "-" + Math.random().toString(36).slice(2, 8)),
-            createdAt: now.toISOString(),
-            dateKey: localDateKey(now),
-            text: ocrText.value,
-            imageDataUrl: previewUrl.value
-          };
-          await dbPut(rec);
+          const target = ocrTargetRec.value;
+          if (target) {
+            // 一覧からの再認識: 同じレコードを上書き。id/createdAt/dateKey と
+            // 元画像はそのまま保持し、テキストだけ差し替える(カレンダーに
+            // 新規エントリを増やさない)。
+            await dbPut(Object.assign({}, target, { text: ocrText.value }));
+          } else {
+            const now = new Date();
+            await dbPut({
+              id: (now.getTime() + "-" + Math.random().toString(36).slice(2, 8)),
+              createdAt: now.toISOString(),
+              dateKey: localDateKey(now),
+              text: ocrText.value,
+              imageDataUrl: previewUrl.value
+            });
+          }
           await refreshRecords();
-          discard();
-          showToast("保存しました");
+          resetOcrState();
+          ocrTargetRec.value = null;
+          showToast(target ? "更新しました" : "保存しました");
           view.value = "list";
         } catch (e) {
           captureErr.value = "保存に失敗しました: " + (e && e.message ? e.message : e);
         }
       }
 
-      function discard() {
+      // Clear the recognition-flow scratch state (does not navigate).
+      function resetOcrState() {
         stage.value = "input";
         previewUrl.value = ""; ocrText.value = ""; ocrRawText.value = ""; ocrFilteredText.value = "";
-        ocrConf.value = null; engineUsed.value = "";
+        ocrConf.value = null; engineUsed.value = ""; captureErr.value = "";
         progress.value = 0; progStatus.value = ""; currentBitmap = null;
       }
+      // キャンセル: 認識機能を抜けて開いた場所へ戻る。撮影由来は撮影入力へ
+      // 破棄、一覧由来は一覧へ戻る(対象レコードは無変更)。
+      function cancelOcr() {
+        resetOcrState();
+        const origin = ocrOrigin.value;
+        ocrTargetRec.value = null;
+        view.value = origin === "list" ? "list" : "capture";
+      }
       function backToCrop() {
-        if (!currentBitmap) { stage.value = "input"; return; }
+        if (!currentBitmap) { cancelOcr(); return; }
         captureErr.value = "";
         stage.value = "crop";
       }
@@ -1701,7 +1734,11 @@ details.acc .hint{ margin-top:0; }
       async function reOcrRecord(rec) {
         try {
           const blob = await (await fetch(rec.imageDataUrl)).blob();
-          view.value = "capture";
+          // 一覧からの再認識: 保存時にこのレコードを上書きする。handleBlob が
+          // 認識機能(view='ocr')へ遷移する。元画像は保持するため previewUrl の
+          // 再エンコード版ではなく rec.imageDataUrl を上書き対象に残す。
+          ocrOrigin.value = "list";
+          ocrTargetRec.value = rec;
           await handleBlob(blob);
         } catch (e) {
           showToast("画像の読み込みに失敗しました");
@@ -1813,7 +1850,8 @@ details.acc .hint{ margin-top:0; }
             ]),
             h("div", { class: "btn-row", style: { marginTop: "10px" } }, [
               h("button", { class: "btn sec", onClick: () => runOcr(false) }, "全体を読み取る"),
-              h("button", { class: "btn sec", onClick: discard }, "やり直す")
+              h("button", { class: "btn sec", onClick: cancelOcr },
+                ocrOrigin.value === "list" ? "キャンセル" : "やり直す")
             ])
           ])
         ]);
@@ -1821,10 +1859,11 @@ details.acc .hint{ margin-top:0; }
 
       function renderResult() {
         const engineName = engineUsed.value || "PaddleOCR";
+        const overwrite = !!ocrTargetRec.value;
         return h("div", {}, [
           captureErr.value ? h("div", { class: "err" }, captureErr.value) : null,
           h("div", { class: "card" }, [
-            h("h2", { class: "sec" }, "認識結果 — 保存しますか？"),
+            h("h2", { class: "sec" }, overwrite ? "認識結果 — 上書き保存しますか？" : "認識結果 — 保存しますか？"),
             h("img", { class: "preview", src: previewUrl.value, alt: "撮影した画像" }),
             h("div", { class: "engine" }, ["エンジン: ", h("b", {}, engineName)]),
             ocrConf.value != null ? h("div", { class: "conf" }, "信頼度: " + ocrConf.value + "%") : null,
@@ -1845,11 +1884,12 @@ details.acc .hint{ margin-top:0; }
             // deliberately not beside 保存する, so a mis-tap can't hit save
             // when the user meant to discard (or vice versa).
             h("div", { class: "btn-row", style: { marginTop: "14px" } }, [
-              h("button", { class: "btn ok", onClick: saveRecord }, "保存する")
+              h("button", { class: "btn ok", onClick: saveRecord }, overwrite ? "上書き保存" : "保存する")
             ]),
             h("div", { class: "btn-row", style: { marginTop: "10px" } }, [
               h("button", { class: "btn sec", onClick: backToCrop }, "範囲を選び直す"),
-              h("button", { class: "btn sec", onClick: discard }, "破棄")
+              h("button", { class: "btn sec", onClick: cancelOcr },
+                overwrite ? "キャンセル" : "破棄")
             ])
           ])
         ]);
@@ -1892,11 +1932,16 @@ details.acc .hint{ margin-top:0; }
         ]);
       }
 
+      // 撮影タブ: 入力(カメラ/選択/貼り付け + 認識モード)のみ。
       function renderCapture() {
-        if (stage.value === "processing") return renderProcessing();
-        if (stage.value === "crop") return renderCrop();
-        if (stage.value === "result") return renderResult();
         return renderInput();
+      }
+      // 認識機能(独立フロー): 範囲選択→認識中→結果。撮影/一覧のどちらから
+      // 入ってもここを通り、キャンセル先と保存挙動は ocrOrigin で決まる。
+      function renderOcr() {
+        if (stage.value === "processing") return renderProcessing();
+        if (stage.value === "result") return renderResult();
+        return renderCrop();
       }
 
       function renderRecord(rec) {
@@ -1987,15 +2032,30 @@ details.acc .hint{ margin-top:0; }
         ]);
       }
 
+      // メインタブは撮影/一覧の2つ。認識機能(view='ocr')は独立フローで、
+      // タブとしては見せない。認識中は開いた側(ocrOrigin)のタブをハイライト
+      // し、タブを押すと認識を中断して移動する。
+      function goTab(tab) {
+        if (view.value === "ocr") { resetOcrState(); ocrTargetRec.value = null; }
+        view.value = tab;
+        if (tab === "list") refreshRecords();
+      }
+      const captureTabActive = () =>
+        view.value === "capture" || (view.value === "ocr" && ocrOrigin.value === "capture");
+      const listTabActive = () =>
+        view.value === "list" || (view.value === "ocr" && ocrOrigin.value === "list");
+
       return () => h("div", {}, [
         h("header", {}, [
           h("h1", {}, ["ラベルOCR", h("span", { class: "ver" }, APP_VERSION)]),
           h("div", { class: "nav" }, [
-            h("button", { class: view.value === "capture" ? "active" : "", onClick: () => { view.value = "capture"; } }, "撮影"),
-            h("button", { class: view.value === "list" ? "active" : "", onClick: () => { view.value = "list"; refreshRecords(); } }, "一覧")
+            h("button", { class: captureTabActive() ? "active" : "", onClick: () => goTab("capture") }, "撮影"),
+            h("button", { class: listTabActive() ? "active" : "", onClick: () => goTab("list") }, "一覧")
           ])
         ]),
-        h("main", {}, view.value === "capture" ? renderCapture() : renderList()),
+        h("main", {}, view.value === "capture" ? renderCapture()
+          : view.value === "ocr" ? renderOcr()
+          : renderList()),
         lightboxUrl.value
           ? h("div", { class: "lightbox", onClick: () => { lightboxUrl.value = ""; } }, [
               h("img", { src: lightboxUrl.value, alt: "保存した画像" }),

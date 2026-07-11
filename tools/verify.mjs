@@ -499,17 +499,69 @@ async function main() {
   await page.waitForFunction(() => !document.querySelector(".lightbox"), { timeout: 5000 });
   log("Step 5c: thumbnail tap opened the lightbox; tap closed it.");
 
-  // ---- re-OCR from a saved record ----
+  // ---- re-OCR from a saved record (B案: overwrites the SAME record) ----
+  // 再読み取り enters the standalone recognition flow FROM the 一覧
+  // (origin=list). Recognition is not a main tab, so the 一覧 tab stays
+  // highlighted. キャンセル returns to the list unchanged; 上書き保存 overwrites
+  // the source record in place (same calendar entry, updated text) instead of
+  // creating a new record — the reported UX bug this fixes.
+  const recCountBefore = await page.evaluate(() => document.querySelectorAll(".rec").length);
+
+  // (a) cancel path: 再読み取り -> recognition flow (一覧 tab stays active) ->
+  //     キャンセル -> back to the list, record count unchanged.
   await page.getByText("再読み取り", { exact: true }).click();
   await page.waitForSelector(".crop-stage", { timeout: 10000 });
-  const backToCapture = await page.evaluate(() =>
-    document.querySelector("header .nav button.active").textContent.includes("撮影"));
-  if (!backToCapture) return fail("再読み取り did not switch to the capture view.");
+  const listTabStillActive = await page.evaluate(() =>
+    document.querySelector("header .nav button.active").textContent.includes("一覧"));
+  if (!listTabStillActive) return fail("再読み取り should keep the 一覧 tab active (recognition is not a main tab; origin=list).");
+  await page.getByText("キャンセル", { exact: true }).click();
+  await page.waitForSelector(".rec .txt", { timeout: 8000 });
+  const afterCancelCount = await page.evaluate(() => document.querySelectorAll(".rec").length);
+  if (afterCancelCount !== recCountBefore) {
+    return fail("再認識のキャンセルでレコード数が変化した (" + recCountBefore + " -> " + afterCancelCount + ").");
+  }
+  log("Step 5d: 再読み取り -> 認識機能(一覧タブ維持) -> キャンセルで一覧へ戻り、件数不変。");
+
+  // (b) overwrite path: 再読み取り -> read -> tag text -> 上書き保存 ->
+  //     the SAME record is updated (count unchanged, marker text present).
+  await page.getByText("再読み取り", { exact: true }).click();
+  await page.waitForSelector(".crop-stage", { timeout: 10000 });
   await expandCropToFull();
   await page.getByText("この範囲を読み取る", { exact: true }).click();
   await assertResult("Re-OCR-from-saved", "KX[-—_ ]?1234AB", "98765");
-  log("Step 5d: 再読み取り re-ran OCR from the saved image (crop stage + text matched).");
-  await page.getByText("破棄", { exact: true }).click();
+  const overwriteBtnCount = await page.getByText("上書き保存", { exact: true }).count();
+  if (overwriteBtnCount < 1) return fail("再認識の結果画面に「上書き保存」ボタンが無い (origin=list の上書きモードになっていない)。");
+  await page.evaluate(() => {
+    const ta = document.querySelector("textarea");
+    ta.value = ta.value + " REOCR-777";
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await page.getByText("上書き保存", { exact: true }).click();
+  await page.waitForFunction(() => document.querySelector("header .nav button.active") &&
+    document.querySelector("header .nav button.active").textContent.includes("一覧"), { timeout: 8000 });
+  await page.waitForSelector(".rec .txt", { timeout: 8000 });
+  const afterOverwrite = await page.evaluate(() => ({
+    count: document.querySelectorAll(".rec").length,
+    hasMarker: [...document.querySelectorAll(".rec .txt")].some((e) => /REOCR-777/.test(e.textContent))
+  }));
+  if (afterOverwrite.count !== recCountBefore) {
+    return fail("再認識の上書き保存で新しいカレンダー記録が増えた (" + recCountBefore + " -> " + afterOverwrite.count + ")。同一レコードを上書きすべき。");
+  }
+  if (!afterOverwrite.hasMarker) return fail("再認識の上書き保存後、更新テキスト(REOCR-777)が一覧に反映されていない。");
+  log("Step 5e: 再読み取り -> 上書き保存で同一レコードを更新(件数不変・テキスト反映)。");
+
+  // Overwrite persists across reload as the same single record (no dup entry).
+  await page.reload({ waitUntil: "load" });
+  await page.waitForSelector("header h1", { timeout: 10000 });
+  await page.getByText("一覧", { exact: true }).click();
+  await page.waitForSelector(".rec .txt", { timeout: 8000 });
+  const overwritePersisted = await page.evaluate(() => ({
+    count: document.querySelectorAll(".rec").length,
+    marker: [...document.querySelectorAll(".rec .txt")].some((e) => /REOCR-777/.test(e.textContent))
+  }));
+  if (overwritePersisted.count !== recCountBefore) return fail("再認識上書き後のレコード数がリロードで変化した。");
+  if (!overwritePersisted.marker) return fail("再認識の上書きテキストが永続化されていない (IndexedDB)。");
+  log("Step 5f: 上書き保存はリロード後も同一レコードとして永続化(件数不変)。");
 
   // ---- Japanese OCR mode ----
   const cjkFamily = detectCjkFont();
