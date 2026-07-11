@@ -2,7 +2,7 @@
 
 # 変更履歴
 
-課題 → 解決の記録。現行仕様は [SPEC.md](./SPEC.md)、使い方は [README](../README.md)。
+課題 → 解決の記録。現行仕様は [`SPEC.md`](./SPEC.md)、使い方は [`MANUAL.md`](./MANUAL.md)。
 
 </div>
 

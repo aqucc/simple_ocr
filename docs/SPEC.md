@@ -2,7 +2,7 @@
 
 # 技術仕様
 
-`index.html` の内部仕様。使い方は [README](../README.md)、経緯は [CHANGELOG](./CHANGELOG.md)。
+`index.html` の内部仕様（エンジン・アルゴリズム・依存）。ユーザー向けの機能説明は [`FEATURES-DETAIL.md`](./FEATURES-DETAIL.md)、操作は [`MANUAL.md`](./MANUAL.md)、経緯は [`CHANGELOG.md`](./CHANGELOG.md)。
 
 </div>
 
@@ -10,7 +10,7 @@
 
 単一の `index.html`（Vue 3 ランタイム限定・`h()` render 関数のみ・テンプレート不使用）で完結。OCR は **PaddleOCR + ONNX Runtime Web** に一本化（Tesseract.js は廃止）。画像はサーバーへ送らず、保存は IndexedDB。
 
-**目次** — [エンジン構成](#エンジン構成) ・ [文字検出](#文字検出dbnet--pp-ocrv4-detopencv-なし) ・ [前処理](#前処理canvas) ・ [ノイズ除去](#ノイズ除去) ・ [CSP](#セキュリティcsp) ・ [依存](#依存固定バージョン) ・ [検証](#検証自動テスト) ・ [既知の制限](#既知の制限)
+セクション: エンジン構成 / 文字検出 / 前処理 / ノイズ除去 / セキュリティ(CSP) / 依存 / 検証 / 既知の制限（右上の目次アイコンからも辿れます）。
 
 ## エンジン構成
 

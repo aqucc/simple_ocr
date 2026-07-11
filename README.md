@@ -36,10 +36,13 @@
 
 ## ドキュメント
 
-| | |
+| ファイル | 内容 |
 | --- | --- |
-| [**仕様**](docs/SPEC.md) | エンジン構成・前処理・単語フィルタ・CSP・依存・テスト |
-| [**変更履歴**](docs/CHANGELOG.md) | 各課題をどう解決してきたかの記録 |
+| [`MANUAL.md`](docs/MANUAL.md) | 使い方マニュアル — 画面ごとの操作 |
+| [`FEATURES.md`](docs/FEATURES.md) | 機能一覧 — 何ができるか |
+| [`FEATURES-DETAIL.md`](docs/FEATURES-DETAIL.md) | 機能詳細 — 各機能の挙動と使いどころ |
+| [`SPEC.md`](docs/SPEC.md) | 技術仕様 — エンジン・前処理・CSP・依存・テスト |
+| [`CHANGELOG.md`](docs/CHANGELOG.md) | 変更履歴 — 課題をどう解決してきたか |
 
 ## 開発
 
