@@ -554,17 +554,18 @@ async function main() {
   // below/behind it are allowed to scroll in day/all views).
   await checkSE2("calendar", "main", "cal");
 
-  // List-mode transitions: カレンダー → 日選択(day) → 日毎リストのみ(all) → カレンダー.
+  // List-mode transitions: カレンダー → 日選択(day) → この月の記録(month) → カレンダー.
   await openDayWithRecords();                                   // tap the day -> day view
-  await page.getByText("日毎リストのみ", { exact: true }).click();
+  await page.getByText("この月の記録", { exact: true }).click();
   await page.waitForSelector(".rec .txt", { timeout: 8000 });
-  const allViewOk = await page.evaluate(() =>
+  const monthViewOk = await page.evaluate(() =>
     [...document.querySelectorAll(".rec .txt")].some((e) => /KX/i.test(e.textContent)) &&
-    !document.querySelector(".cal"));                           // 'all' shows records, no calendar
-  if (!allViewOk) return fail("「日毎リストのみ」view did not show records without the calendar.");
+    !!document.querySelector(".monthhdr") &&                    // month header present
+    !document.querySelector(".cal"));                          // month list shows records, no calendar
+  if (!monthViewOk) return fail("「この月の記録」view did not show the month's records with a month header and no calendar.");
   await page.getByText("‹ カレンダー", { exact: true }).click();
   await page.waitForSelector(".cal", { timeout: 8000 });
-  log("Step 4b: 一覧のモード遷移 (カレンダー→日→日毎リストのみ→カレンダー) OK。");
+  log("Step 4b: 一覧のモード遷移 (カレンダー→日→この月の記録→カレンダー) OK。");
 
   // Reload -> persistence. Entering 一覧 shows the calendar; open the day.
   await page.reload({ waitUntil: "load" });

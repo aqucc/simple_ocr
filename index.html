@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-HnJvYxoongS41A8Me8GboZkN/wTUJ+kfaaPFgFZqdDw=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-DvAukSIYUZCWa/Je+a98VatMPaFk/j6lw7ucutrCMwM='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-ELIfEMYPLq4G1htw2hpUjc9Uvx0lzHvbsIQss1TgFsc=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-ibr0jWoE1I/Uo49ZFfuYjKuSy3DWu6Yrw/pBuA+DOY8='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
 <title>ラベルOCR</title>
 <style>
 :root{
@@ -128,6 +128,7 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
 .calcell.sel .caldot{ background:#fff; color:var(--accent); }
 .datehdr{ font-size:14px; font-weight:700; color:var(--muted); margin:16px 2px 8px;
   padding-bottom:6px; border-bottom:1px solid var(--line); }
+.monthhdr{ font-size:15px; font-weight:700; color:var(--fg); margin:0 2px 4px; }
 /* A record groups its controls by target:
    ・写真カラム(.photo): サムネイル(拡大) + その画像の再読取
    ・本文(.body): テキスト + そのテキストのコピー/編集
@@ -1838,6 +1839,16 @@ details.acc .hint{ margin-top:0; }
         }
         return Object.keys(groups).sort().reverse().map((k) => ({ key: k, items: groups[k] }));
       });
+      // カレンダーで表示中の月（calY/calM）の記録を日毎にまとめたもの。
+      const monthPrefix = computed(() => calY.value + "-" + pad2(calM.value + 1));
+      const monthGroups = computed(() => {
+        const groups = {};
+        for (const r of records.value) {
+          if (!r.dateKey.startsWith(monthPrefix.value)) continue;
+          (groups[r.dateKey] = groups[r.dateKey] || []).push(r);
+        }
+        return Object.keys(groups).sort().reverse().map((k) => ({ key: k, items: groups[k] }));
+      });
       const calCells = computed(() => {
         const y = calY.value, m = calM.value;
         const first = new Date(y, m, 1).getDay();
@@ -2090,7 +2101,8 @@ details.acc .hint{ margin-top:0; }
       }
 
       function toCalendar() { listView.value = "calendar"; filterDate.value = null; }
-      function showAllDays() { listView.value = "all"; filterDate.value = null; }
+      // 表示中の月の全記録を日毎リストで表示（filterDate は解除、月は calY/calM）。
+      function showMonth() { listView.value = "month"; filterDate.value = null; }
 
       function renderGroups(groups) {
         return groups.length === 0
@@ -2108,17 +2120,21 @@ details.acc .hint{ margin-top:0; }
         if (listView.value === "calendar") {
           return h("div", {}, [err, renderCalendar()]);
         }
-        // 'day'(filterDate で1日に絞り込み) / 'all'(filterDate=null で全日)。
-        // visibleGroups が filterDate に応じて絞り込み済み。
+        // 'day'(その日) / 'month'(表示中の月の全記録)。
+        const isMonth = listView.value === "month";
+        const groups = isMonth ? monthGroups.value : visibleGroups.value;
         return h("div", {}, [
           err,
           h("div", { class: "listbar" }, [
             h("button", { class: "btn sec", onClick: toCalendar }, "‹ カレンダー"),
             listView.value === "day"
-              ? h("button", { class: "btn sec", onClick: showAllDays }, "日毎リストのみ")
+              ? h("button", { class: "btn sec", onClick: showMonth }, "この月の記録")
               : null
           ]),
-          renderGroups(visibleGroups.value)
+          isMonth
+            ? h("div", { class: "monthhdr" }, calY.value + "年 " + (calM.value + 1) + "月の記録")
+            : null,
+          renderGroups(groups)
         ]);
       }
 
