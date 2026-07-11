@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-fMbt9uhvfZoETonhub8dm0KXsiY1QWSKNNgFjgfL4kM=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-Y2v4cKGX8NoNcNAZvNMQ/9GtlwRL1+a0tp7zQjHlJOw='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-NGDdPvGN0CLpMuYEYFOlJymtwG+NAS+M/kuL5MooSx4=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-RXgCM19nhJSHNnTSBR79MkZUu1994bI4ahUr0aSYJq8='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
 <title>ラベルOCR</title>
 <style>
 :root{
@@ -17,7 +17,7 @@
 html,body{ margin:0; padding:0; background:var(--bg); color:var(--fg);
   font-family:-apple-system,BlinkMacSystemFont,"Hiragino Kaku Gothic ProN","Yu Gothic",Meiryo,sans-serif;
   font-size:16px; line-height:1.5; }
-#app{ max-width:680px; margin:0 auto; min-height:100vh; display:flex; flex-direction:column; }
+#app{ max-width:680px; margin:0 auto; min-height:100svh; display:flex; flex-direction:column; }
 header{ position:sticky; top:0; z-index:10; background:var(--panel);
   border-bottom:1px solid var(--line);
   padding:calc(env(safe-area-inset-top) + 8px) 12px 8px; }
@@ -27,7 +27,7 @@ header h1 .ver{ font-size:10px; font-weight:400; color:var(--muted); margin-left
 .nav button{ flex:1; min-height:44px; border:1px solid var(--line); background:var(--panel2);
   color:var(--fg); border-radius:10px; font-size:15px; font-weight:600; }
 .nav button.active{ background:var(--accent); border-color:var(--accent); color:#fff; }
-main{ flex:1; padding:14px 12px calc(env(safe-area-inset-bottom) + 28px); }
+main{ flex:1; min-height:0; padding:12px 12px calc(env(safe-area-inset-bottom) + 14px); }
 .card{ background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
   padding:14px; margin-bottom:14px; }
 .btn{ display:flex; align-items:center; justify-content:center; gap:8px;
@@ -46,7 +46,7 @@ label.filebtn{ cursor:pointer; }
   padding:10px 12px; border-radius:10px; font-size:14px; margin-bottom:12px; white-space:pre-wrap; }
 .preview{ width:100%; border-radius:10px; display:block; background:var(--panel2);
   border:1px solid var(--line); max-height:46vh; object-fit:contain; }
-textarea{ width:100%; min-height:120px; resize:vertical; background:var(--panel2);
+textarea{ width:100%; min-height:104px; resize:vertical; background:var(--panel2);
   color:var(--fg); border:1px solid var(--line); border-radius:10px; padding:10px;
   font-size:16px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
 .progwrap{ margin:10px 0; }
@@ -65,12 +65,17 @@ textarea{ width:100%; min-height:120px; resize:vertical; background:var(--panel2
 .engine b{ color:var(--fg); }
 h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700; }
 /* ---- crop stage ---- */
-.crop-stage{ position:relative; width:100%; margin:2px 0 4px; touch-action:none;
+.crop-stage{ position:relative; width:100%; margin:2px auto 4px; touch-action:none;
   user-select:none; -webkit-user-select:none; background:var(--panel2);
   border:1px solid var(--line); border-radius:10px; overflow:hidden; }
-/* No max-height/object-fit: the overlay's %-coordinates must map 1:1 onto the
-   image box, so the stage must be exactly the image's own aspect ratio. */
-.crop-img{ display:block; width:100%; height:auto; pointer-events:none; }
+/* The stage is given an explicit px width/height (computed from the image's
+   natural aspect ratio and a height cap) so its box stays EXACTLY the image's
+   rendered box -- the overlay's %-coordinates then map 1:1 onto the image --
+   while never growing tall enough to force a scroll on small phones (SE2).
+   The image fills that box; since the box keeps the image aspect ratio,
+   object-fit:fill introduces no visible distortion. */
+.crop-img{ display:block; width:100%; height:100%; object-fit:fill; max-height:44svh;
+  pointer-events:none; }
 .crop-overlay{ position:absolute; border:2px solid var(--accent);
   box-shadow:0 0 0 100vmax rgba(0,0,0,.5); box-sizing:border-box; cursor:move; touch-action:none; }
 .crop-handle{ position:absolute; width:30px; height:30px; background:var(--accent);
@@ -82,10 +87,20 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
 /* Quad (台形補正) overlay: SVG polygon outline + 4 free corner handles. */
 .quad-svg{ position:absolute; inset:0; width:100%; height:100%; pointer-events:none; overflow:visible; }
 .crop-handle.qh{ transform:translate(-50%,-50%); cursor:move; }
-.segctl{ display:inline-flex; border:1px solid var(--line); border-radius:10px; overflow:hidden; margin:0 0 10px; }
-.segctl button{ min-height:36px; padding:0 16px; border:none; background:var(--panel2);
+.segctl{ display:inline-flex; border:1px solid var(--line); border-radius:10px; overflow:hidden; margin:0; }
+.segctl button{ min-height:38px; padding:0 16px; border:none; background:var(--panel2);
   color:var(--muted); font-size:13px; font-weight:800; }
 .segctl button.on{ background:var(--accent); color:#fff; }
+/* Compact one-row control strip on the recognition (crop) screen: recognition
+   mode (英数字/日本語) on the left, crop shape (矩形/台形) on the right. */
+.cropctl{ display:flex; gap:10px; align-items:center; justify-content:space-between;
+  flex-wrap:wrap; margin:0 0 10px; }
+/* Recognition screens fill the viewport so they never need to scroll: the card
+   is a flex column and its textarea (result) absorbs the slack. */
+.ocrscreen{ display:flex; flex-direction:column; height:100%; }
+.ocrscreen > .card{ flex:1; display:flex; flex-direction:column; min-height:0; margin-bottom:0; }
+.ocrscreen .resultcard textarea{ flex:1 1 auto; min-height:64px; }
+.preview.compact{ max-height:22svh; }
 .cal{ background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
   padding:12px; margin-bottom:14px; }
 .calhead{ display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
@@ -1403,6 +1418,25 @@ details.acc .hint{ margin-top:0; }
       const quadCorners = ref(null);        // {tl,tr,br,bl}, each {x,y} as image-box fractions
       const stageEl = ref(null);
       let currentBitmap = null;             // non-reactive
+      // Natural size of the loaded image + a reactive viewport, so the crop
+      // stage can be sized to a height-capped display box (see cropDisplay).
+      const bitmapSize = ref(null);         // {w,h} natural pixels
+      const viewport = ref({ w: window.innerWidth || 375, h: window.innerHeight || 600 });
+      // Display box (px) for the crop stage: the image scaled to fit both the
+      // card width and ~40% of the viewport height, keeping its aspect ratio so
+      // the crop overlay's %-coordinates still map 1:1 onto the image. The
+      // height cap is what keeps the recognition screen scroll-free on iPhone SE2.
+      const cropDisplay = computed(() => {
+        const b = bitmapSize.value;
+        if (!b || !b.w || !b.h) return null;
+        const appW = Math.min(viewport.value.w, 680);
+        const maxW = Math.max(120, appW - 54);   // 主内容: main(12)+card(14)+境界 の左右
+        // ~33% of the viewport height keeps a tall (portrait) image from forcing
+        // a scroll on iPhone SE2 while staying large enough to crop comfortably.
+        const maxH = Math.max(140, Math.round(viewport.value.h * 0.33));
+        const scale = Math.min(maxW / b.w, maxH / b.h, 1);
+        return { w: Math.round(b.w * scale), h: Math.round(b.h * scale) };
+      });
 
       // ---- list state ----
       const records = ref([]);
@@ -1430,6 +1464,7 @@ details.acc .hint{ margin-top:0; }
         }
         try {
           currentBitmap = await loadBitmap(blob);
+          bitmapSize.value = { w: currentBitmap.width, h: currentBitmap.height };
           previewUrl.value = toStorageDataUrl(currentBitmap);
           cropRect.value = { x: 0.1, y: 0.35, w: 0.8, h: 0.3 };
           cropMode.value = "rect"; quadCorners.value = null;
@@ -1774,6 +1809,9 @@ details.acc .hint{ margin-top:0; }
       onMounted(() => {
         refreshRecords();
         window.addEventListener("paste", onPaste);
+        window.addEventListener("resize", () => {
+          viewport.value = { w: window.innerWidth || 375, h: window.innerHeight || 600 };
+        });
       });
 
       // ---------------- render helpers ----------------
@@ -1823,15 +1861,24 @@ details.acc .hint{ margin-top:0; }
           width: (r.w * 100) + "%", height: (r.h * 100) + "%"
         };
         const isQuad = cropMode.value === "quad";
+        const disp = cropDisplay.value;
+        const stageStyle = disp ? { width: disp.w + "px", height: disp.h + "px" } : null;
         return h("div", {}, [
           captureErr.value ? h("div", { class: "err" }, captureErr.value) : null,
           h("div", { class: "card" }, [
-            h("h2", { class: "sec" }, "読み取る範囲を選択"),
-            h("div", { class: "segctl" }, [
-              h("button", { class: isQuad ? "" : "on", onClick: () => setCropMode("rect") }, "矩形"),
-              h("button", { class: isQuad ? "on" : "", onClick: () => setCropMode("quad") }, "台形補正")
+            // 認識モードはここ(認識機能)で選ぶ。撮影前ではなく読み取り直前に
+            // 選べるので、同じ画像を英数字/日本語で読み比べるのも容易。
+            h("div", { class: "cropctl" }, [
+              h("div", { class: "segctl" }, [
+                h("button", { class: ocrMode.value === "eng" ? "on" : "", onClick: () => setOcrMode("eng") }, "英数字"),
+                h("button", { class: ocrMode.value === "jpn" ? "on" : "", onClick: () => setOcrMode("jpn") }, "日本語")
+              ]),
+              h("div", { class: "segctl" }, [
+                h("button", { class: isQuad ? "" : "on", onClick: () => setCropMode("rect") }, "矩形"),
+                h("button", { class: isQuad ? "on" : "", onClick: () => setCropMode("quad") }, "台形補正")
+              ])
             ]),
-            h("div", { class: "crop-stage", ref: stageEl }, [
+            h("div", { class: "crop-stage", ref: stageEl, style: stageStyle }, [
               h("img", { class: "crop-img", src: previewUrl.value, alt: "撮影した画像" }),
               isQuad
                 ? quadOverlay()
@@ -1843,9 +1890,9 @@ details.acc .hint{ margin-top:0; }
                   ])
             ]),
             h("div", { class: "hint" }, isQuad
-              ? "四隅のハンドルをラベルの角に合わせると、歪みを補正して読み取ります。"
-              : "読み取りたい文字の周りを枠で囲みます。四隅をドラッグして調整できます。"),
-            h("div", { class: "btn-row", style: { marginTop: "12px" } }, [
+              ? "四隅をラベルの角に合わせます。"
+              : "読みたい行だけを枠で囲むと精度が上がります。"),
+            h("div", { class: "btn-row", style: { marginTop: "10px" } }, [
               h("button", { class: "btn", onClick: () => runOcr(true) }, "この範囲を読み取る")
             ]),
             h("div", { class: "btn-row", style: { marginTop: "10px" } }, [
@@ -1860,13 +1907,15 @@ details.acc .hint{ margin-top:0; }
       function renderResult() {
         const engineName = engineUsed.value || "PaddleOCR";
         const overwrite = !!ocrTargetRec.value;
-        return h("div", {}, [
+        return h("div", { class: "ocrscreen" }, [
           captureErr.value ? h("div", { class: "err" }, captureErr.value) : null,
-          h("div", { class: "card" }, [
+          h("div", { class: "card resultcard" }, [
             h("h2", { class: "sec" }, overwrite ? "認識結果 — 上書き保存しますか？" : "認識結果 — 保存しますか？"),
-            h("img", { class: "preview", src: previewUrl.value, alt: "撮影した画像" }),
-            h("div", { class: "engine" }, ["エンジン: ", h("b", {}, engineName)]),
-            ocrConf.value != null ? h("div", { class: "conf" }, "信頼度: " + ocrConf.value + "%") : null,
+            h("img", { class: "preview compact", src: previewUrl.value, alt: "撮影した画像" }),
+            h("div", { class: "engine" }, [
+              "エンジン: ", h("b", {}, engineName),
+              ocrConf.value != null ? "　信頼度 " + ocrConf.value + "%" : ""
+            ]),
             h("div", { class: "wfrow" }, [
               h("span", { class: "wflabel" }, "単語フィルタ"),
               h("button", {
@@ -1896,27 +1945,10 @@ details.acc .hint{ margin-top:0; }
       }
 
       function renderInput() {
+        // 認識モード選択は撮影画面ではなく、撮影後の認識画面(renderCrop)へ移動。
+        // ここは入力手段だけに絞る(SE2 でも縦スクロール不要な軽い画面)。
         return h("div", {}, [
           captureErr.value ? h("div", { class: "err" }, captureErr.value) : null,
-          h("div", { class: "card" }, [
-            h("h2", { class: "sec" }, "認識モード"),
-            h("div", { class: "nav" }, [
-              h("button", {
-                class: ocrMode.value === "eng" ? "active" : "",
-                onClick: () => setOcrMode("eng")
-              }, "英数字(型番向け)"),
-              h("button", {
-                class: ocrMode.value === "jpn" ? "active" : "",
-                onClick: () => setOcrMode("jpn")
-              }, "日本語+英数字")
-            ]),
-            h("details", { class: "acc" }, [
-              h("summary", {}, "このモードについて"),
-              ocrMode.value === "eng"
-                ? h("div", { class: "hint" }, "英数字モードは PaddleOCR (PP-OCRv4) を使用します。「全体を読み取る」では文字検出（DBNet）で各行を見つけてから認識します。初回のみエンジンとモデル（合計 約22MB）をダウンロードします。")
-                : h("div", { class: "hint" }, "日本語モードは PaddleOCR（PP-OCRv3 japan の認識モデル）を使用します。和文に加え、住所の 1-2-3 や型番の半角英数字もそのまま読み取れます。初回のみエンジンとモデル（合計 約22MB）をダウンロードするため、少し時間がかかります。")
-            ])
-          ]),
           h("div", { class: "card" }, [
             h("h2", { class: "sec" }, "ラベルを撮影・選択"),
             fileButton("カメラで撮影", true),
@@ -1925,8 +1957,8 @@ details.acc .hint{ margin-top:0; }
             h("div", { style: { height: "10px" } }),
             h("button", { class: "btn sec", onClick: pasteFromClipboard }, "クリップボードから貼り付け"),
             h("details", { class: "acc" }, [
-              h("summary", {}, "撮影のコツ"),
-              h("div", { class: "hint" }, "型番・製造番号のシールを大きく、明るく撮影すると精度が上がります。撮影後に読み取る範囲を選べます。斜めから撮った場合は「台形補正」で四隅を合わせると歪みを補正できます（傾きは自動で補正されます）。画像をコピーして Ctrl/Cmd+V でも貼り付けできます。")
+              h("summary", {}, "モードと撮影のコツ"),
+              h("div", { class: "hint" }, "読み取りは撮影後の画面で「英数字」か「日本語」を選べます。英数字は型番・製造番号向け（PP-OCRv4）、日本語は住所・品名など和文向け（PP-OCRv3 japan。住所の 1-2-3 など半角数字もそのまま）。初回のみモデル（合計 約22MB）をダウンロードします。ラベルは大きく明るく撮影し、読みたい行だけを枠で囲むと精度が上がります。斜めなら台形補正で四隅を合わせます（傾きは自動補正）。画像をコピーして Ctrl/Cmd+V でも貼り付けできます。")
             ])
           ])
         ]);

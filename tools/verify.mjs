@@ -229,10 +229,91 @@ async function main() {
     if (r.x > 0.1 || r.w < 0.8) throw new Error("crop drag did not expand the rect (x=" + r.x.toFixed(2) + " w=" + r.w.toFixed(2) + ")");
   }
 
+  // ---- iPhone SE2/SE3 no-scroll layout gates ----
+  // The capture and recognition (crop/result) screens must fit an SE2 Safari
+  // viewport without vertical scroll; the calendar must be fully visible with
+  // the day's record list allowed to scroll below it.
+  const SE2 = { width: 375, height: 553 };   // SE2/SE3 Safari usable area
+  const BIG = { width: 1280, height: 900 };
+  async function checkSE2(name, mode) {
+    await page.setViewportSize(SE2);
+    await page.waitForTimeout(140);           // let the resize listener re-render
+    const m = await page.evaluate(() => {
+      const de = document.documentElement;
+      const cal = document.querySelector(".cal");
+      return {
+        sh: de.scrollHeight, ih: window.innerHeight, iw: window.innerWidth, sw: de.scrollWidth,
+        calBottom: cal ? Math.round(cal.getBoundingClientRect().bottom) : null
+      };
+    });
+    const horiz = m.sw - m.iw;
+    const vert = mode === "cal" ? (m.calBottom == null ? 0 : m.calBottom - m.ih) : (m.sh - m.ih);
+    log("SE2[" + name + "]: doc " + m.sw + "x" + m.sh + " vp " + m.iw + "x" + m.ih +
+      (mode === "cal" ? " calBottom=" + m.calBottom : "") + " -> vOverflow=" + vert + "px hOverflow=" + horiz + "px");
+    if (horiz > 2) { await page.setViewportSize(BIG); return fail("SE2 gate '" + name + "': horizontal overflow " + horiz + "px."); }
+    if (vert > 2) { await page.setViewportSize(BIG); return fail("SE2 gate '" + name + "': vertical overflow " + vert + "px (must fit without scroll)."); }
+    await page.setViewportSize(BIG);
+  }
+
+  // Recognition mode is chosen on the crop screen now (英数字/日本語 segctl),
+  // not before capture; requires the crop stage to be visible.
+  async function selectMode(kind) {
+    const label = kind === "jpn" ? "日本語" : "英数字";
+    await page.waitForSelector(".crop-stage", { timeout: 10000 });
+    await page.getByText(label, { exact: true }).click();
+    await page.waitForFunction((lab) => {
+      const b = [...document.querySelectorAll(".segctl button")].find((el) => el.textContent === lab);
+      return !!b && b.classList.contains("on");
+    }, label, { timeout: 5000 });
+  }
+
   log(`\nServing ${repoRoot} at ${base}`);
   await page.goto(base + "/index.html", { waitUntil: "load" });
   await page.waitForSelector("header h1", { timeout: 10000 });
   log("Step 1: page loaded, Vue mounted (render functions, no template compiler).");
+
+  // Mode/tips info now lives on the capture screen as a single collapsed
+  // accordion ("モードと撮影のコツ"); it carries the jpn model download-size hint.
+  const capAccClosed = await page.evaluate(() => {
+    const d = [...document.querySelectorAll("details.acc")]
+      .find((x) => x.querySelector("summary").textContent.includes("モードと撮影のコツ"));
+    return d ? !d.open : null;
+  });
+  if (capAccClosed !== true) return fail("Capture-screen info accordion missing or not collapsed by default.");
+  await page.getByText("モードと撮影のコツ", { exact: true }).click();
+  const capHintShown = await page.evaluate(() => {
+    const d = [...document.querySelectorAll("details.acc")]
+      .find((x) => x.querySelector("summary").textContent.includes("モードと撮影のコツ"));
+    return !!d && d.open && /日本語/.test(d.textContent) && /MB/i.test(d.textContent);
+  });
+  if (!capHintShown) return fail("Capture-screen accordion did not reveal the mode/download-size hint.");
+  await page.getByText("モードと撮影のコツ", { exact: true }).click(); // collapse again
+  log("Step 1b: capture-screen 'モードと撮影のコツ' accordion collapsed by default; reveals mode + jpn download hint.");
+
+  // SE2 no-scroll gate: capture screen.
+  await checkSE2("capture", "full");
+
+  // SE2 no-scroll gate: recognition (crop) screen with a TALL portrait image
+  // (exercises the height cap that keeps the stage from forcing a scroll).
+  await page.evaluate(() => {
+    const c = document.createElement("canvas"); c.width = 620; c.height = 880;
+    const x = c.getContext("2d");
+    x.fillStyle = "#fff"; x.fillRect(0, 0, c.width, c.height);
+    x.fillStyle = "#000"; x.font = "30px monospace"; x.textBaseline = "top";
+    x.fillText("MODEL: KX-1234AB", 30, 400);
+    x.fillText("S/N 5X-98765", 30, 470);
+    const input = document.querySelector('input[type=file]:not([capture])');
+    return new Promise((r) => c.toBlob((b) => {
+      const f = new File([b], "portrait.png", { type: "image/png" });
+      const dt = new DataTransfer(); dt.items.add(f);
+      input.files = dt.files; input.dispatchEvent(new Event("change", { bubbles: true })); r();
+    }, "image/png"));
+  });
+  await page.waitForSelector(".crop-stage", { timeout: 10000 });
+  await checkSE2("crop-portrait", "full");
+  await page.getByText("やり直す", { exact: true }).click();
+  await page.waitForSelector(".card", { timeout: 8000 });
+  log("Step 1c: SE2 no-scroll verified on the capture screen and a portrait-image crop screen.");
 
   // Feed a generated label image into the file picker input.
   await page.evaluate(async () => {
@@ -252,6 +333,8 @@ async function main() {
     input.dispatchEvent(new Event("change", { bubbles: true }));
   });
   log("Step 2: label image injected, crop stage should appear...");
+  await page.waitForSelector(".crop-stage", { timeout: 10000 });
+  await checkSE2("crop-landscape", "full");
 
   // ---- cropped 英数字 path -> PaddleOCR (rec-only) ----
   await expandCropToFull();
@@ -351,6 +434,9 @@ async function main() {
   const recognized = await page.evaluate(() => document.querySelector("textarea").value);
   log("Step 3: cropped-region OCR via " + engine1 + " matched. Recognized:\n  " + recognized.replace(/\n/g, "\\n"));
 
+  // SE2 no-scroll gate: recognition RESULT screen (flex-fill card).
+  await checkSE2("result", "full");
+
   if (cspViolations.length) return fail("CSP violation(s) occurred during Paddle OCR.");
   const cspFromPage = await page.evaluate(() => window.__csp || []);
   if (cspFromPage.length) { cspViolations.push(...cspFromPage); return fail("securitypolicyviolation events fired."); }
@@ -443,6 +529,10 @@ async function main() {
   if (!listOk.hasText) return fail("Saved record text not found in list.");
   if (!listOk.badge) return fail("Calendar badge (.caldot) not shown for a day with records.");
   log("Step 4: record listed under today (" + todayHdrDay + ") and calendar shows a badge.");
+
+  // SE2 gate: the calendar must be fully visible without scrolling (records
+  // below it are allowed to scroll).
+  await checkSE2("calendar", "cal");
 
   // Reload -> persistence.
   await page.reload({ waitUntil: "load" });
@@ -571,31 +661,7 @@ async function main() {
 
   await page.getByText("撮影", { exact: true }).click();
   await page.waitForSelector(".card", { timeout: 8000 });
-
-  await page.getByText("日本語+英数字", { exact: true }).click();
-  await page.waitForFunction(() => {
-    const btns = [...document.querySelectorAll(".nav button")];
-    const jpnBtn = btns.find((b) => b.textContent.includes("日本語"));
-    return !!jpnBtn && jpnBtn.classList.contains("active");
-  }, { timeout: 5000 });
-  log("Step 6: switched capture view to 日本語+英数字 mode.");
-
-  // Mode details are behind a collapsed accordion (<details class="acc">).
-  const accClosed = await page.evaluate(() => {
-    const d = [...document.querySelectorAll("details.acc")]
-      .find((x) => x.querySelector("summary").textContent.includes("このモードについて"));
-    return d ? !d.open : null;
-  });
-  if (accClosed !== true) return fail("Mode-info accordion missing or not collapsed by default.");
-  await page.getByText("このモードについて", { exact: true }).click();
-  const hintShown = await page.evaluate(() => {
-    const d = [...document.querySelectorAll("details.acc")]
-      .find((x) => x.querySelector("summary").textContent.includes("このモードについて"));
-    return !!d && d.open && /日本語/.test(d.textContent) && /MB/i.test(d.textContent);
-  });
-  if (!hintShown) return fail("Japanese-mode first-download size hint not revealed by the accordion.");
-  await page.getByText("このモードについて", { exact: true }).click(); // collapse again
-  log("Step 7: mode-info accordion collapsed by default; opening it reveals the jpn download hint.");
+  log("Step 6: back to 撮影 (capture) to start a fresh jpn-mode read; mode is now chosen on the crop screen.");
 
   const variant = cjkFamily ? "cjk" : "ascii";
   await page.evaluate(({ variant, cjkFamily }) => {
@@ -631,6 +697,7 @@ async function main() {
   }, { variant, cjkFamily });
   log(`Step 8: jpn-mode ${variant === "cjk" ? "CJK label (品番 AB-1234)" : "ASCII label (MODEL KX-9876 / TYPE JP-TEST)"} image injected; running cropped PaddleOCR (japan) path...`);
 
+  await selectMode("jpn");
   await expandCropToFull();
   await page.getByText("この範囲を読み取る", { exact: true }).click();
 
@@ -814,13 +881,8 @@ async function main() {
 
   await page.getByText("破棄", { exact: true }).click();
   await page.waitForSelector(".card", { timeout: 8000 });
-  await page.getByText("英数字(型番向け)", { exact: true }).click();
-  await page.waitForFunction(() => {
-    const b = [...document.querySelectorAll(".nav button")].find((el) => el.textContent.includes("英数字"));
-    return !!b && b.classList.contains("active");
-  }, { timeout: 5000 });
-
   await injectDataUrlFile(decoyDataUrl, "decoy-label.png");
+  await selectMode("eng");
   await expandCropToFull();
   await page.getByText("この範囲を読み取る", { exact: true }).click();
   await assertResult("Decoy-Paddle-crop", "KX[-—_ ]?1234AB", "98765");
@@ -876,13 +938,8 @@ async function main() {
   const wordSegDataUrl = await generateWordSegLabelDataUrl();
   log("Step 12: word-segmentation label image generated (MODEL/S-N lines + one 'MADE     IN     JAPAN' line).");
 
-  await page.getByText("英数字(型番向け)", { exact: true }).click();
-  await page.waitForFunction(() => {
-    const b = [...document.querySelectorAll(".nav button")].find((el) => el.textContent.includes("英数字"));
-    return !!b && b.classList.contains("active");
-  }, { timeout: 5000 });
-
   await injectDataUrlFile(wordSegDataUrl, "wordseg-label.png");
+  await selectMode("eng");
   await expandCropToFull();
   await page.getByText("この範囲を読み取る", { exact: true }).click();
   await assertResult("WordSeg-Paddle-crop", "KX[-—_ ]?1234AB", "98765");
@@ -962,13 +1019,8 @@ async function main() {
   const barcodeDataUrl = await generateBarcodeDigitsDataUrl();
   log("Step 13: barcode-neighbor label image generated (40-stripe barcode block + '4 901234 567894' digit line, nothing else).");
 
-  await page.getByText("英数字(型番向け)", { exact: true }).click();
-  await page.waitForFunction(() => {
-    const b = [...document.querySelectorAll(".nav button")].find((el) => el.textContent.includes("英数字"));
-    return !!b && b.classList.contains("active");
-  }, { timeout: 5000 });
-
   await injectDataUrlFile(barcodeDataUrl, "barcode-digits.png");
+  await selectMode("eng");
   await expandCropToFull();
   await page.getByText("この範囲を読み取る", { exact: true }).click();
   await assertResult("Barcode-Paddle-crop", "901234", "567894");
@@ -998,13 +1050,8 @@ async function main() {
   const noisyDataUrl = await generateNoisyLabelDataUrl();
   log("Step 14: noisy label image generated (gradient bg + ~800 speckles + vignette).");
 
-  await page.getByText("英数字(型番向け)", { exact: true }).click();
-  await page.waitForFunction(() => {
-    const b = [...document.querySelectorAll(".nav button")].find((el) => el.textContent.includes("英数字"));
-    return !!b && b.classList.contains("active");
-  }, { timeout: 5000 });
-
   await injectDataUrlFile(noisyDataUrl, "noisy-label.png");
+  await selectMode("eng");
   await expandCropToFull();
   await page.getByText("この範囲を読み取る", { exact: true }).click();
   await assertResult("Noise-Paddle-crop", "KX[-—_ ]?1234AB", "98765");
@@ -1051,13 +1098,8 @@ async function main() {
   // the score gate + word filter reject the speckle without hallucinating).
   await page.getByText("破棄", { exact: true }).click();
   await page.waitForSelector(".card", { timeout: 8000 });
-  await page.getByText("日本語+英数字", { exact: true }).click();
-  await page.waitForFunction(() => {
-    const b = [...document.querySelectorAll(".nav button")].find((el) => el.textContent.includes("日本語"));
-    return !!b && b.classList.contains("active");
-  }, { timeout: 5000 });
-
   await injectDataUrlFile(noisyDataUrl, "noisy-label-2.png");
+  await selectMode("jpn");
   await expandCropToFull();
   await page.getByText("この範囲を読み取る", { exact: true }).click();
   await assertResult("Noise-jpn-Paddle-crop", "KX", "98765|1234");
@@ -1160,14 +1202,9 @@ async function main() {
     }, quad);
   }
 
-  await page.getByText("英数字(型番向け)", { exact: true }).click();
-  await page.waitForFunction(() => {
-    const b = [...document.querySelectorAll(".nav button")].find((el) => el.textContent.includes("英数字"));
-    return !!b && b.classList.contains("active");
-  }, { timeout: 5000 });
-
   const perspDataUrl = await generatePerspectiveLabelDataUrl(perspQuad);
   await injectDataUrlFile(perspDataUrl, "persp-label.png");
+  await selectMode("eng");
   await page.waitForSelector(".crop-stage", { timeout: 10000 });
   log("Step 17: perspective-distorted label injected (trapezoid, top edge inset 12% each side).");
 
