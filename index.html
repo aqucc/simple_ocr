@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-a1ebjh1NBE9lEBBcSDunR0/gh2Igfd5YWCEbz18r2MA=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-e/UdbrFOdqpNzMKLnQ6JvtiAWPlGmQI2o4QtOFCxdnw='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-HnJvYxoongS41A8Me8GboZkN/wTUJ+kfaaPFgFZqdDw=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-DvAukSIYUZCWa/Je+a98VatMPaFk/j6lw7ucutrCMwM='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
 <title>ラベルOCR</title>
 <style>
 :root{
@@ -41,6 +41,9 @@ main{ flex:1 1 auto; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:t
 .btn.sec{ background:var(--panel2); color:var(--fg); border:1px solid var(--line); }
 .btn.danger{ background:var(--danger); }
 .btn.ok{ background:var(--ok); }
+/* Accent-outline: a colored (action) button that isn't the solid primary. */
+.btn.line{ background:transparent; color:var(--accent); border:1px solid var(--accent); }
+.btn.line:active{ background:rgba(76,141,255,.14); }
 .btn-row{ display:flex; gap:10px; }
 .btn-row .btn{ flex:1; }
 .hidden-file{ position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
@@ -125,22 +128,27 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
 .calcell.sel .caldot{ background:#fff; color:var(--accent); }
 .datehdr{ font-size:14px; font-weight:700; color:var(--muted); margin:16px 2px 8px;
   padding-bottom:6px; border-bottom:1px solid var(--line); }
-.rec{ display:flex; gap:12px; }
-.rec .thumb{ width:74px; height:74px; flex:0 0 74px; border-radius:10px; object-fit:cover;
+/* A record groups its controls by target:
+   ・写真カラム(.photo): サムネイル(拡大) + その画像の再読取
+   ・本文(.body): テキスト + そのテキストのコピー/編集
+   ・削除(.del-x): 項目自体の操作なので右上に独立配置 */
+.rec{ display:flex; gap:12px; position:relative; }
+.rec .photo{ flex:0 0 74px; display:flex; flex-direction:column; gap:6px; }
+.rec .thumb{ width:74px; height:74px; border-radius:10px; object-fit:cover;
   background:var(--panel2); border:1px solid var(--line); }
-.rec .body{ flex:1; min-width:0; }
+.rec .reread{ width:74px; min-height:34px; border-radius:8px; border:1px solid var(--accent);
+  background:transparent; color:var(--accent); font-size:12px; font-weight:700; }
+.rec .reread:active{ background:rgba(76,141,255,.14); }
+.rec .body{ flex:1; min-width:0; padding-right:34px; }   /* 右上の ✕ 分を空ける */
 .rec .time{ font-size:12px; color:var(--muted); }
 .rec .txt{ white-space:pre-wrap; word-break:break-word; font-family:ui-monospace,Menlo,monospace;
   font-size:14px; margin:4px 0 8px; }
-/* Action buttons: two rows (primary: コピー/再読み取り, secondary: 編集/削除)
-   instead of 4-across so each target stays >=44px tall with >=8px gaps even
-   at 375px width. 削除 gets a tinted danger background (not just a border) so
-   it reads as visually distinct from the neutral row above it. */
-.rec .acts{ display:flex; flex-direction:column; gap:8px; }
-.rec .acts .actrow{ display:flex; gap:8px; }
-.rec .acts button{ flex:1; min-height:44px; border-radius:10px; border:1px solid var(--line);
+.rec .txt-acts{ display:flex; gap:8px; }
+.rec .txt-acts button{ flex:1; min-height:40px; border-radius:10px; border:1px solid var(--line);
   background:var(--panel2); color:var(--fg); font-size:14px; font-weight:600; }
-.rec .acts button.del{ background:rgba(255,90,95,.14); color:var(--danger); border-color:var(--danger); }
+.rec .del-x{ position:absolute; top:0; right:0; width:32px; height:32px; border-radius:8px;
+  border:1px solid var(--danger); background:rgba(255,90,95,.12); color:var(--danger);
+  font-size:15px; line-height:1; }
 .rec textarea{ min-height:88px; font-size:14px; margin:4px 0 0; }
 .rec .editrow{ display:flex; gap:8px; margin-top:8px; }
 .rec .editrow button{ flex:1; min-height:44px; border-radius:10px; border:none;
@@ -174,8 +182,8 @@ details.acc .hint{ margin-top:0; }
 .ocr-modal .modalbody{ flex:1 1 auto; min-height:0; overflow-y:auto; overscroll-behavior:contain;
   display:flex; flex-direction:column; padding:12px; }
 .ocr-modal .card{ margin-bottom:0; }
-/* The three read/cancel actions sit in one row; shrink text so they fit at 375px. */
-.btn-row.triple .btn{ font-size:14px; padding:0 4px; }
+/* The three actions sit in one row; shrink text + nowrap so they fit at 375px. */
+.btn-row.triple .btn{ font-size:13px; padding:0 2px; white-space:nowrap; }
 /* List: calendar-only screen has a bottom action row; day/all screens a top bar. */
 .listbar{ display:flex; gap:10px; margin:0 0 12px; }
 .listbar .btn{ flex:1; }
@@ -1928,12 +1936,11 @@ details.acc .hint{ margin-top:0; }
             h("div", { class: "hint" }, isQuad
               ? "四隅をラベルの角に合わせます。"
               : "読みたい行だけを枠で囲むと精度が上がります。"),
-            // 指定範囲 / 全体読取 / キャンセル(やり直す) を横1列に。
+            // キャンセル / 指定範囲読取 / 全体読取 を横1列。読取アクションは有色。
             h("div", { class: "btn-row triple", style: { marginTop: "10px" } }, [
-              h("button", { class: "btn", onClick: () => runOcr(true) }, "指定範囲"),
-              h("button", { class: "btn sec", onClick: () => runOcr(false) }, "全体読取"),
-              h("button", { class: "btn sec", onClick: cancelOcr },
-                ocrOrigin.value === "list" ? "キャンセル" : "やり直す")
+              h("button", { class: "btn sec", onClick: cancelOcr }, "キャンセル"),
+              h("button", { class: "btn", onClick: () => runOcr(true) }, "指定範囲読取"),
+              h("button", { class: "btn line", onClick: () => runOcr(false) }, "全体読取")
             ])
           ])
         ]);
@@ -1963,17 +1970,12 @@ details.acc .hint{ margin-top:0; }
               onInput: (e) => { ocrText.value = e.target.value; },
               spellcheck: "false"
             }),
-            // 保存する stands alone as the single, full-width primary action.
-            // 破棄/範囲を選び直す are a secondary pair on their own row below --
-            // deliberately not beside 保存する, so a mis-tap can't hit save
-            // when the user meant to discard (or vice versa).
-            h("div", { class: "btn-row", style: { marginTop: "14px" } }, [
+            // キャンセル / 再読取 / 保存 を横1列に(テキスト欄を広く取るため)。
+            // 保存とキャンセルは離して配置し、誤タップを避ける(間に再読取)。
+            h("div", { class: "btn-row triple", style: { marginTop: "12px" } }, [
+              h("button", { class: "btn sec", onClick: cancelOcr }, "キャンセル"),
+              h("button", { class: "btn line", onClick: backToCrop }, "再読取"),
               h("button", { class: "btn ok", onClick: saveRecord }, overwrite ? "上書き保存" : "保存する")
-            ]),
-            h("div", { class: "btn-row", style: { marginTop: "10px" } }, [
-              h("button", { class: "btn sec", onClick: backToCrop }, "範囲を選び直す"),
-              h("button", { class: "btn sec", onClick: cancelOcr },
-                overwrite ? "キャンセル" : "破棄")
             ])
           ])
         ]);
@@ -2020,11 +2022,21 @@ details.acc .hint{ margin-top:0; }
 
       function renderRecord(rec) {
         const isEditing = editingId.value === rec.id;
-        // In edit mode the other actions (コピー/再読み取り/削除) are not
-        // rendered at all -- simplest way to guarantee no mis-taps while a
-        // save/cancel decision is pending on this card.
-        const bodyRest = isEditing
-          ? [
+        // グループ化:
+        //  ・写真(サムネイル=拡大) と 再読取 を左カラムに束ねる
+        //  ・テキスト に コピー / 編集 を束ねる(本文カラム)
+        //  ・削除 は項目自体の操作なので右上に独立配置(✕)
+        // 編集中は誤タップ防止のため、再読取/コピー/編集/削除を出さない。
+        const photoCol = h("div", { class: "photo" }, [
+          h("img", {
+            class: "thumb", src: rec.imageDataUrl, alt: "保存した画像(タップで拡大)",
+            onClick: () => { lightboxUrl.value = rec.imageDataUrl; }
+          }),
+          isEditing ? null : h("button", { class: "reread", onClick: () => reOcrRecord(rec) }, "再読取")
+        ]);
+        const body = isEditing
+          ? h("div", { class: "body" }, [
+              h("div", { class: "time" }, timeLabel(rec.createdAt)),
               h("textarea", {
                 value: editText.value,
                 onInput: (e) => { editText.value = e.target.value; },
@@ -2034,29 +2046,19 @@ details.acc .hint{ margin-top:0; }
                 h("button", { class: "save", onClick: () => saveEdit(rec) }, "保存"),
                 h("button", { class: "cancel", onClick: cancelEdit }, "キャンセル")
               ])
-            ]
-          : [
+            ])
+          : h("div", { class: "body" }, [
+              h("div", { class: "time" }, timeLabel(rec.createdAt)),
               h("div", { class: "txt" }, rec.text || "(テキストなし)"),
-              h("div", { class: "acts" }, [
-                h("div", { class: "actrow" }, [
-                  h("button", { onClick: () => copyRecord(rec) }, "コピー"),
-                  h("button", { onClick: () => reOcrRecord(rec) }, "再読み取り")
-                ]),
-                h("div", { class: "actrow" }, [
-                  h("button", { onClick: () => startEdit(rec) }, "編集"),
-                  h("button", { class: "del", onClick: () => deleteRecord(rec) }, "削除")
-                ])
+              h("div", { class: "txt-acts" }, [
+                h("button", { onClick: () => copyRecord(rec) }, "コピー"),
+                h("button", { onClick: () => startEdit(rec) }, "編集")
               ])
-            ];
+            ]);
         return h("div", { class: "rec", key: rec.id }, [
-          h("img", {
-            class: "thumb", src: rec.imageDataUrl, alt: "保存した画像(タップで拡大)",
-            onClick: () => { lightboxUrl.value = rec.imageDataUrl; }
-          }),
-          h("div", { class: "body" }, [
-            h("div", { class: "time" }, timeLabel(rec.createdAt)),
-            ...bodyRest
-          ])
+          isEditing ? null : h("button", { class: "del-x", onClick: () => deleteRecord(rec), "aria-label": "削除" }, "✕"),
+          photoCol,
+          body
         ]);
       }
 

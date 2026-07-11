@@ -328,7 +328,7 @@ async function main() {
   });
   await page.waitForSelector(".crop-stage", { timeout: 10000 });
   await checkSE2("crop-portrait", ".modalbody");
-  await page.getByText("やり直す", { exact: true }).click();
+  await page.getByText("キャンセル", { exact: true }).click();
   await page.waitForSelector(".card", { timeout: 8000 });
   log("Step 1c: SE2 no-scroll verified on the capture screen and a portrait-image crop screen.");
 
@@ -356,7 +356,7 @@ async function main() {
   // ---- cropped 英数字 path -> PaddleOCR (rec-only) ----
   await expandCropToFull();
   log("Step 2b: crop rect expanded to full photo via pointer-event drags.");
-  await page.getByText("指定範囲", { exact: true }).click();
+  await page.getByText("指定範囲読取", { exact: true }).click();
   const assertResult = async (label, reKx, reOther) => {
     try {
       await page.waitForSelector("textarea", { timeout: 180000 });
@@ -484,7 +484,7 @@ async function main() {
       });
     }, filename);
   }
-  await page.getByText("破棄", { exact: true }).click();       // result -> input
+  await page.getByText("キャンセル", { exact: true }).click();       // result -> input
   await page.waitForSelector(".card", { timeout: 8000 });
   await injectMultiLineLabel("multiline-label.png");
   await page.waitForSelector(".crop-stage", { timeout: 10000 });
@@ -520,10 +520,10 @@ async function main() {
   await page.getByText("全体読取", { exact: true }).click();
   await assertResult("classic-full-cold-start", "KX[-—_ ]?1234AB", "98765");
   log("Step 3b: full-image read works as the first OCR after reload (cold ORT).");
-  await page.getByText("範囲を選び直す", { exact: true }).click();
+  await page.locator(".ocr-modal").getByText("再読取", { exact: true }).click();
   await page.waitForSelector(".crop-stage", { timeout: 10000 });
   await expandCropToFull();
-  await page.getByText("指定範囲", { exact: true }).click();
+  await page.getByText("指定範囲読取", { exact: true }).click();
   await assertResult("Paddle-crop-postreload", "KX[-—_ ]?1234AB", "98765");
 
   // Save the record. Lands on the 一覧 'day' view (the saved record's day),
@@ -584,10 +584,13 @@ async function main() {
     return !!ta && /KX/i.test(ta.value) && /98765/.test(ta.value);
   });
   if (!prefilledOk) return fail("Edit textarea was not pre-filled with the record's existing text.");
-  // While editing, the other per-record actions must not be tappable.
+  // While editing, the other per-record actions (再読取/コピー/編集/削除) must
+  // not be rendered.
   const otherActionsHidden = await page.evaluate(() =>
-    !document.querySelector(".rec .acts"));
-  if (!otherActionsHidden) return fail("コピー/再読み取り/削除 were still present while a record was in edit mode.");
+    !document.querySelector(".rec .reread") &&
+    !document.querySelector(".rec .txt-acts") &&
+    !document.querySelector(".rec .del-x"));
+  if (!otherActionsHidden) return fail("再読取/コピー/編集/削除 were still present while a record was in edit mode.");
   await page.evaluate(() => {
     const ta = document.querySelector(".rec textarea");
     ta.value = ta.value + " EDITED-999";
@@ -630,7 +633,7 @@ async function main() {
 
   // (a) cancel path: 再読み取り -> recognition modal -> キャンセル -> back to the
   //     list, record count unchanged.
-  await page.getByText("再読み取り", { exact: true }).click();
+  await page.locator(".rec").getByText("再読取", { exact: true }).first().click();
   await page.waitForSelector(".ocr-modal .crop-stage", { timeout: 10000 });
   const modalHasTabs = await page.evaluate(() => !!document.querySelector(".ocr-modal .nav"));
   if (modalHasTabs) return fail("Recognition modal must not contain 撮影/一覧 tabs.");
@@ -644,10 +647,10 @@ async function main() {
 
   // (b) overwrite path: 再読み取り -> read -> tag text -> 上書き保存 ->
   //     the SAME record is updated (count unchanged, marker text present).
-  await page.getByText("再読み取り", { exact: true }).click();
+  await page.locator(".rec").getByText("再読取", { exact: true }).first().click();
   await page.waitForSelector(".ocr-modal .crop-stage", { timeout: 10000 });
   await expandCropToFull();
-  await page.getByText("指定範囲", { exact: true }).click();
+  await page.getByText("指定範囲読取", { exact: true }).click();
   await assertResult("Re-OCR-from-saved", "KX[-—_ ]?1234AB", "98765");
   const overwriteBtnCount = await page.getByText("上書き保存", { exact: true }).count();
   if (overwriteBtnCount < 1) return fail("再認識の結果画面に「上書き保存」ボタンが無い (origin=list の上書きモードになっていない)。");
@@ -737,7 +740,7 @@ async function main() {
 
   await selectMode("jpn");
   await expandCropToFull();
-  await page.getByText("指定範囲", { exact: true }).click();
+  await page.getByText("指定範囲読取", { exact: true }).click();
 
   try {
     await page.waitForSelector("textarea", { timeout: 150000 });
@@ -779,7 +782,7 @@ async function main() {
       .replace(/[！-～]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
       .replace(/[‐-―−]/g, "-");
     async function runJpnCropAccept(text, filename) {
-      await page.getByText("破棄", { exact: true }).click();
+      await page.getByText("キャンセル", { exact: true }).click();
       await page.waitForSelector(".card", { timeout: 8000 });
       await page.evaluate(({ text, filename, cjkFamily }) => {
         const c = document.createElement("canvas");
@@ -801,7 +804,7 @@ async function main() {
         });
       }, { text, filename, cjkFamily });
       await expandCropToFull();
-      await page.getByText("指定範囲", { exact: true }).click();
+      await page.getByText("指定範囲読取", { exact: true }).click();
       await page.waitForFunction(() => {
         const ta = document.querySelector("textarea");
         return ta && ta.value.trim().length > 0;
@@ -917,12 +920,12 @@ async function main() {
   const decoyDataUrl = await generateDecoyLabelDataUrl(cjkFamily);
   log("Step 10: decoy label image generated (circled R, boxed kanji, triangle, model/serial, MADE, JAPAN).");
 
-  await page.getByText("破棄", { exact: true }).click();
+  await page.getByText("キャンセル", { exact: true }).click();
   await page.waitForSelector(".card", { timeout: 8000 });
   await injectDataUrlFile(decoyDataUrl, "decoy-label.png");
   await selectMode("eng");
   await expandCropToFull();
-  await page.getByText("指定範囲", { exact: true }).click();
+  await page.getByText("指定範囲読取", { exact: true }).click();
   await assertResult("Decoy-Paddle-crop", "KX[-—_ ]?1234AB", "98765");
   const engineDecoy = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
   if (!/PaddleOCR/.test(engineDecoy)) return fail("Expected PaddleOCR engine for decoy cropped 英数字 path, got: " + engineDecoy);
@@ -944,7 +947,7 @@ async function main() {
   const cspFromPage5 = await page.evaluate(() => window.__csp || []);
   if (cspFromPage5.length) { cspViolations.push(...cspFromPage5); return fail("securitypolicyviolation events fired during decoy-image OCR."); }
 
-  await page.getByText("破棄", { exact: true }).click();
+  await page.getByText("キャンセル", { exact: true }).click();
   await page.waitForSelector(".card", { timeout: 8000 });
 
   // ---- Acceptance test: word-level segmentation on the Paddle path ----
@@ -979,7 +982,7 @@ async function main() {
   await injectDataUrlFile(wordSegDataUrl, "wordseg-label.png");
   await selectMode("eng");
   await expandCropToFull();
-  await page.getByText("指定範囲", { exact: true }).click();
+  await page.getByText("指定範囲読取", { exact: true }).click();
   await assertResult("WordSeg-Paddle-crop", "KX[-—_ ]?1234AB", "98765");
   const engineWordSeg = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
   if (!/PaddleOCR/.test(engineWordSeg)) return fail("Expected PaddleOCR engine for word-segmentation cropped 英数字 path, got: " + engineWordSeg);
@@ -996,7 +999,7 @@ async function main() {
   const cspFromPage6 = await page.evaluate(() => window.__csp || []);
   if (cspFromPage6.length) { cspViolations.push(...cspFromPage6); return fail("securitypolicyviolation events fired during word-segmentation OCR."); }
 
-  await page.getByText("破棄", { exact: true }).click();
+  await page.getByText("キャンセル", { exact: true }).click();
   await page.waitForSelector(".card", { timeout: 8000 });
 
   // ---- Acceptance test: barcode-neighbor digits are no longer dropped ----
@@ -1060,7 +1063,7 @@ async function main() {
   await injectDataUrlFile(barcodeDataUrl, "barcode-digits.png");
   await selectMode("eng");
   await expandCropToFull();
-  await page.getByText("指定範囲", { exact: true }).click();
+  await page.getByText("指定範囲読取", { exact: true }).click();
   await assertResult("Barcode-Paddle-crop", "901234", "567894");
   const engineBarcode = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
   if (!/PaddleOCR/.test(engineBarcode)) return fail("Expected PaddleOCR engine for barcode-neighbor cropped 英数字 path, got: " + engineBarcode);
@@ -1078,7 +1081,7 @@ async function main() {
   const cspFromPage7 = await page.evaluate(() => window.__csp || []);
   if (cspFromPage7.length) { cspViolations.push(...cspFromPage7); return fail("securitypolicyviolation events fired during barcode-neighbor OCR."); }
 
-  await page.getByText("破棄", { exact: true }).click();
+  await page.getByText("キャンセル", { exact: true }).click();
   await page.waitForSelector(".card", { timeout: 8000 });
 
   // ---- Noise-robustness test (acceptance gate for the hallucination fixes) ----
@@ -1091,7 +1094,7 @@ async function main() {
   await injectDataUrlFile(noisyDataUrl, "noisy-label.png");
   await selectMode("eng");
   await expandCropToFull();
-  await page.getByText("指定範囲", { exact: true }).click();
+  await page.getByText("指定範囲読取", { exact: true }).click();
   await assertResult("Noise-Paddle-crop", "KX[-—_ ]?1234AB", "98765");
   const noisyPaddleText = await page.evaluate(() => document.querySelector("textarea").value);
   const engineNoisyPaddle = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
@@ -1134,12 +1137,12 @@ async function main() {
 
   // Same noisy image through the cropped jpn PaddleOCR path (japan rec model +
   // the score gate + word filter reject the speckle without hallucinating).
-  await page.getByText("破棄", { exact: true }).click();
+  await page.getByText("キャンセル", { exact: true }).click();
   await page.waitForSelector(".card", { timeout: 8000 });
   await injectDataUrlFile(noisyDataUrl, "noisy-label-2.png");
   await selectMode("jpn");
   await expandCropToFull();
-  await page.getByText("指定範囲", { exact: true }).click();
+  await page.getByText("指定範囲読取", { exact: true }).click();
   await assertResult("Noise-jpn-Paddle-crop", "KX", "98765|1234");
   const noisyTessText = await page.evaluate(() => document.querySelector("textarea").value);
   const engineNoisyTess = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
@@ -1152,7 +1155,7 @@ async function main() {
   const cspFromPage4 = await page.evaluate(() => window.__csp || []);
   if (cspFromPage4.length) { cspViolations.push(...cspFromPage4); return fail("securitypolicyviolation events fired during noisy jpn OCR."); }
 
-  await page.getByText("破棄", { exact: true }).click();
+  await page.getByText("キャンセル", { exact: true }).click();
   await page.waitForSelector(".card", { timeout: 8000 });
 
   // ---- Perspective (台形補正) test ----
@@ -1279,7 +1282,7 @@ async function main() {
       await dragHandle(".crop-handle.qh-" + key, tx, ty);
     }
   }
-  await page.getByText("指定範囲", { exact: true }).click();
+  await page.getByText("指定範囲読取", { exact: true }).click();
   await assertResult("Perspective-Paddle-quad", "KX[-—_ ]?1234AB", "98765");
   const enginePersp = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
   if (!/PaddleOCR/.test(enginePersp)) return fail("Expected PaddleOCR engine for perspective quad path, got: " + enginePersp);
@@ -1290,7 +1293,7 @@ async function main() {
   const cspPersp = await page.evaluate(() => window.__csp || []);
   if (cspPersp.length) { cspViolations.push(...cspPersp); return fail("securitypolicyviolation events fired during perspective OCR."); }
 
-  await page.getByText("破棄", { exact: true }).click();
+  await page.getByText("キャンセル", { exact: true }).click();
   await page.waitForSelector(".card", { timeout: 8000 });
 
   // ---- Automatic deskew test ----
@@ -1326,7 +1329,7 @@ async function main() {
   log("Step 18: 12°-rotated label injected (矩形 mode; relies on automatic deskew).");
   const deskewCountBefore = deskewMsgs.length;
   await expandCropToFull();
-  await page.getByText("指定範囲", { exact: true }).click();
+  await page.getByText("指定範囲読取", { exact: true }).click();
   await assertResult("Deskew-Paddle-crop", "KX[-—_ ]?1234AB", "98765");
   const deskewText = await page.evaluate(() => document.querySelector("textarea").value);
   const chosenAngle = deskewMsgs.slice(deskewCountBefore).join(" | ") || "(none captured)";
@@ -1336,7 +1339,7 @@ async function main() {
   const cspDeskew = await page.evaluate(() => window.__csp || []);
   if (cspDeskew.length) { cspViolations.push(...cspDeskew); return fail("securitypolicyviolation events fired during deskew OCR."); }
 
-  await page.getByText("破棄", { exact: true }).click();
+  await page.getByText("キャンセル", { exact: true }).click();
 
   if (errors.length) return fail("JS errors were collected during the run.");
   if (cspViolations.length) return fail("CSP violations were collected during the run.");
