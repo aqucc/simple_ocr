@@ -151,6 +151,11 @@ async function main() {
   const errors = [];
   const cspViolations = [];
   const unmappedCdn = [];
+  // Every jsdelivr basename fulfilled from cache, in request order — lets a test
+  // assert e.g. that the ブロック解析 full-image method never fetched the DBNet
+  // det model (it's model-light by design).
+  const cdnHits = [];
+  const countDet = () => cdnHits.filter((nm) => nm === "ch_PP-OCRv4_det_infer.onnx").length;
 
   // Intercept jsdelivr; fulfill from the local cache. The japan rec model and
   // its dict are SELF-HOSTED (served same-origin from models/ by the static
@@ -159,6 +164,7 @@ async function main() {
     const url = new URL(route.request().url());
     const name = basename(url.pathname);
     const local = CACHE_FILES[name];
+    if (local && existsSync(local)) cdnHits.push(name);
     if (local && existsSync(local)) {
       // Correct MIME matters: dynamic import() of .mjs requires a JS type and
       // WebAssembly.instantiateStreaming requires application/wasm.
@@ -349,14 +355,124 @@ async function main() {
   const cspFromPage = await page.evaluate(() => window.__csp || []);
   if (cspFromPage.length) { cspViolations.push(...cspFromPage); return fail("securitypolicyviolation events fired."); }
 
-  // ---- full-image path -> PaddleOCR DBNet detection + rec ----
+  // ---- full-image ブロック解析 (block-analysis) method — model-light ----
+  // A SECOND, user-selectable method for 「全体を読み取る」: pure-JS block
+  // segmentation, no DBNet det model. Run it FIRST (before the classic method
+  // ever loads det) on a MULTI-LINE label, so the "no det request" assertion is
+  // genuinely meaningful — det has never been fetched at this point.
+  // Helper: inject an in-page multi-line label (3 lines, generous spacing so
+  // block grouping yields per-line blocks).
+  async function injectMultiLineLabel(filename) {
+    await page.evaluate((filename) => {
+      const c = document.createElement("canvas");
+      c.width = 760; c.height = 260;
+      const x = c.getContext("2d");
+      x.fillStyle = "#fff"; x.fillRect(0, 0, c.width, c.height);
+      x.fillStyle = "#000"; x.font = "30px monospace"; x.textBaseline = "top";
+      x.fillText("MODEL: KX-1234AB", 30, 30);
+      x.fillText("S/N 5X-98765", 30, 110);
+      x.fillText("MADE IN JAPAN", 30, 190);
+      const input = document.querySelector('input[type=file]:not([capture])');
+      return new Promise((resolve) => {
+        c.toBlob((blob) => {
+          const file = new File([blob], filename, { type: "image/png" });
+          const dt = new DataTransfer();
+          dt.items.add(file);
+          input.files = dt.files;
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+          resolve();
+        }, "image/png");
+      });
+    }, filename);
+  }
+  const blockMethodActive = () => page.evaluate(() => {
+    const b = [...document.querySelectorAll(".segctl button")].find((el) => el.textContent.includes("ブロック解析"));
+    return !!b && b.classList.contains("on");
+  });
+
+  await page.getByText("破棄", { exact: true }).click();       // result -> input
+  await page.waitForSelector(".card", { timeout: 8000 });
+  await injectMultiLineLabel("multiline-label.png");
+  await page.waitForSelector(".crop-stage", { timeout: 10000 });
+  await page.getByText("ブロック解析", { exact: true }).click();
+  if (!(await blockMethodActive())) return fail("全体方式トグル: ブロック解析 did not become active after tapping it.");
+  const detBeforeBlock = countDet();
+  await page.getByText("全体を読み取る", { exact: true }).click();
+  await assertResult("Block-full", "KX[-—_ ]?1234AB", "98765");
+  const engineBlock = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
+  if (!/PaddleOCR/.test(engineBlock)) return fail("Expected PaddleOCR engine for block-analysis full-image path, got: " + engineBlock);
+  const blockText = await page.evaluate(() => document.querySelector("textarea").value);
+  log("Step 3a: full-image ブロック解析 recognized:\n  " + blockText.replace(/\n/g, "\\n"));
+  // All expected tokens present.
+  const iKX = blockText.search(/KX/i), i987 = blockText.search(/98765/);
+  const iMade = blockText.search(/MADE/i), iJapan = blockText.search(/JAPAN/i);
+  if (iKX < 0 || i987 < 0 || iMade < 0 || iJapan < 0) {
+    return fail("Block-method test: missing expected token(s). KX@" + iKX + " 98765@" + i987 +
+      " MADE@" + iMade + " JAPAN@" + iJapan + "\nText:\n" + blockText);
+  }
+  // Reading order: top line's tokens must precede the bottom line's.
+  if (!(iKX < i987 && i987 < iMade)) {
+    return fail("Block-method test: reading order wrong (expected KX < 98765 < MADE). Indices " +
+      iKX + "," + i987 + "," + iMade + "\nText:\n" + blockText);
+  }
+  // Result marker must identify the block method.
+  const markerBlock = await page.evaluate(() => { const e = document.querySelector(".engine"); return e ? e.textContent : ""; });
+  if (!/ブロック解析/.test(markerBlock)) return fail("Block-method test: result marker missing 'ブロック解析'. Engine line: " + markerBlock);
+  // Model-light: no DBNet det request occurred during the block read.
+  if (countDet() !== detBeforeBlock || countDet() !== 0) {
+    return fail("Block-method test: DBNet det model was requested during the model-light block read (count " +
+      countDet() + ", expected 0). cdnHits: " + JSON.stringify(cdnHits));
+  }
+  log("Step 3a: block method matched tokens in reading order, marker shows ブロック解析, and NO det-model request fired (det count=" + countDet() + ").");
+
+  if (cspViolations.length) return fail("CSP violation(s) occurred during block-method OCR.");
+  const cspBlock = await page.evaluate(() => window.__csp || []);
+  if (cspBlock.length) { cspViolations.push(...cspBlock); return fail("securitypolicyviolation during block-method OCR."); }
+
+  // ---- full-image 従来 (classic) — DBNet detection + rec, the DEFAULT ----
+  // ORT is already warm (the block read loaded the rec model), so switch back
+  // to 従来 on the same image and read the whole thing: this still exercises the
+  // classic DBNet path and now DOES load the det model.
   await page.getByText("範囲を選び直す", { exact: true }).click();
   await page.waitForSelector(".crop-stage", { timeout: 10000 });
+  await page.getByText("従来", { exact: true }).click();
+  await page.waitForFunction(() => {
+    const b = [...document.querySelectorAll(".segctl button")].find((el) => el.textContent.includes("従来"));
+    return !!b && b.classList.contains("on");
+  }, { timeout: 5000 });
+  const detBeforeClassic = countDet();
   await page.getByText("全体を読み取る", { exact: true }).click();
   await assertResult("Paddle-det-full", "KX[-—_ ]?1234AB", "98765");
   const engine2 = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
   if (!/PaddleOCR/.test(engine2)) return fail("Expected PaddleOCR engine for full-image (det+rec) path, got: " + engine2);
-  log("Step 3b: full-image OCR via DBNet detection + " + engine2 + " matched.");
+  const markerClassic = await page.evaluate(() => { const e = document.querySelector(".engine"); return e ? e.textContent : ""; });
+  if (!/従来/.test(markerClassic)) return fail("Classic full-image test: result marker missing '従来'. Engine line: " + markerClassic);
+  if (countDet() <= detBeforeClassic) {
+    return fail("Classic full-image method should have loaded the DBNet det model, but det request count did not increase (" +
+      detBeforeClassic + " -> " + countDet() + ").");
+  }
+  log("Step 3b: full-image 従来 (classic) OCR via DBNet detection + " + engine2 + " matched (det count " + detBeforeClassic + " -> " + countDet() + ").");
+
+  // ---- method toggle persists across reload (localStorage) ----
+  // Set a NON-default value (block), reload, and confirm the crop-screen toggle
+  // is restored to ブロック解析. No full/classic read runs first after this
+  // reload (that path needs ORT warmed by a prior read); a cropped read below
+  // warms ORT and produces the record the save step expects.
+  await page.getByText("範囲を選び直す", { exact: true }).click();
+  await page.waitForSelector(".crop-stage", { timeout: 10000 });
+  await page.getByText("ブロック解析", { exact: true }).click();
+  const storedMethod = await page.evaluate(() => localStorage.getItem("label_ocr_full_method"));
+  if (storedMethod !== "block") return fail("Full-image method not persisted to localStorage (got: " + storedMethod + ").");
+  await page.reload({ waitUntil: "load" });
+  await page.waitForSelector("header h1", { timeout: 10000 });
+  await injectMultiLineLabel("multiline-label-2.png");
+  await page.waitForSelector(".crop-stage", { timeout: 10000 });
+  if (!(await blockMethodActive())) return fail("Full-image method toggle did not persist across reload (ブロック解析 not active).");
+  log("Step 3c: full-image method toggle persisted across reload (localStorage).");
+  await page.getByText("従来", { exact: true }).click(); // restore default for downstream
+  await expandCropToFull();
+  await page.getByText("この範囲を読み取る", { exact: true }).click();
+  await assertResult("Paddle-crop-postreload", "KX[-—_ ]?1234AB", "98765");
 
   // Save the record.
   await page.getByText("保存する", { exact: true }).click();
