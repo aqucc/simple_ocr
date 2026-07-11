@@ -530,31 +530,38 @@ async function main() {
   // where the record is visible; the calendar is not shown in day view.
   await page.getByText("保存する", { exact: true }).click();
   await page.waitForFunction(() => document.querySelector("header .nav button.active") &&
-    document.querySelector("header .nav button.active").textContent.includes("一覧"), { timeout: 8000 });
+    document.querySelector("header .nav button.active").textContent.includes("カレンダー"), { timeout: 8000 });
   await page.waitForSelector(".rec .txt", { timeout: 8000 });
 
   const now = new Date();
   const todayHdrDay = now.getFullYear() + "年" + (now.getMonth() + 1) + "月" + now.getDate() + "日";
   const dayViewOk = await page.evaluate((hdrDay) => {
-    const hdrs = [...document.querySelectorAll(".datehdr")].map((e) => e.textContent);
+    const nav = document.querySelector(".navlabel");   // day view shows the date in the nav label
     const recText = [...document.querySelectorAll(".rec .txt")].map((e) => e.textContent).join("\n");
-    return { hasToday: hdrs.some((h) => h.startsWith(hdrDay)), hasText: /KX/i.test(recText) && /98765/.test(recText) };
+    return { hasToday: !!nav && nav.textContent.startsWith(hdrDay), hasText: /KX/i.test(recText) && /98765/.test(recText) };
   }, todayHdrDay);
-  if (!dayViewOk.hasToday) return fail("Saved record not shown under today's date header (" + todayHdrDay + ") in the day view.");
+  if (!dayViewOk.hasToday) return fail("Saved record's date not shown in the day-view nav label (" + todayHdrDay + ").");
   if (!dayViewOk.hasText) return fail("Saved record text not found in the day view after saving.");
-  log("Step 4: after 保存, landed on the 一覧 day view showing today's record (" + todayHdrDay + ").");
+  // Day view carries ←前の日 / 次の日→ nav (small link-style); with a single
+  // record-day both arrows are disabled.
+  const dayNav = await page.evaluate(() => {
+    const btns = [...document.querySelectorAll(".navrow .navbtn")];
+    return { count: btns.length, allDisabled: btns.length === 2 && btns.every((b) => b.disabled) };
+  });
+  if (!dayNav.allDisabled) return fail("Day view prev/next-day nav missing or not disabled at the only record-day (buttons=" + dayNav.count + ").");
+  log("Step 4: after 保存, landed on the day view showing today's record (" + todayHdrDay + "); 前の日/次の日 disabled at the single record-day.");
 
-  // 「‹ カレンダー」 -> calendar-only screen: badge on the day + SE2 gate.
-  await page.getByText("‹ カレンダー", { exact: true }).click();
+  // Header タブは「カレンダー」。押すとカレンダーのみ画面へ(戻るボタンは廃止)。
+  await page.getByText("カレンダー", { exact: true }).click();
   await page.waitForSelector(".cal", { timeout: 8000 });
   const badge = await page.evaluate(() => !!document.querySelector(".calcell.has .caldot"));
   if (!badge) return fail("Calendar badge (.caldot) not shown for a day with records.");
-  log("Step 4a: 「‹ カレンダー」 shows the calendar-only screen with a day badge.");
+  log("Step 4a: 「カレンダー」タブでカレンダーのみ画面＋日バッジを表示。");
   // SE2 gate: the calendar must be fully visible without scrolling (records
   // below/behind it are allowed to scroll in day/all views).
   await checkSE2("calendar", "main", "cal");
 
-  // List-mode transitions: カレンダー → 日選択(day) → この月の記録(month) → カレンダー.
+  // List-mode transitions: カレンダー → 日選択(day) → この月の記録(month) → カレンダータブ.
   await openDayWithRecords();                                   // tap the day -> day view
   await page.getByText("この月の記録", { exact: true }).click();
   await page.waitForSelector(".rec .txt", { timeout: 8000 });
@@ -563,14 +570,14 @@ async function main() {
     !!document.querySelector(".monthhdr") &&                    // month header present
     !document.querySelector(".cal"));                          // month list shows records, no calendar
   if (!monthViewOk) return fail("「この月の記録」view did not show the month's records with a month header and no calendar.");
-  await page.getByText("‹ カレンダー", { exact: true }).click();
+  await page.getByText("カレンダー", { exact: true }).click();   // header tab -> calendar
   await page.waitForSelector(".cal", { timeout: 8000 });
-  log("Step 4b: 一覧のモード遷移 (カレンダー→日→この月の記録→カレンダー) OK。");
+  log("Step 4b: 一覧のモード遷移 (カレンダー→日→この月の記録→カレンダータブ) OK。");
 
   // Reload -> persistence. Entering 一覧 shows the calendar; open the day.
   await page.reload({ waitUntil: "load" });
   await page.waitForSelector("header h1", { timeout: 10000 });
-  await page.getByText("一覧", { exact: true }).click();
+  await page.getByText("カレンダー", { exact: true }).click();
   await openDayWithRecords();
   const persisted = await page.evaluate(() =>
     [...document.querySelectorAll(".rec .txt")].some((e) => /KX/i.test(e.textContent) && /98765/.test(e.textContent)));
@@ -606,7 +613,7 @@ async function main() {
 
   await page.reload({ waitUntil: "load" });
   await page.waitForSelector("header h1", { timeout: 10000 });
-  await page.getByText("一覧", { exact: true }).click();
+  await page.getByText("カレンダー", { exact: true }).click();
   await openDayWithRecords();
   const editPersisted = await page.evaluate(() =>
     [...document.querySelectorAll(".rec .txt")].some((e) => /EDITED-999/.test(e.textContent)));
@@ -664,7 +671,7 @@ async function main() {
   log("Step 5e pre-save: #textareas=" + preSave.textareas + " modalVal=" + JSON.stringify(preSave.modalVal));
   await page.getByText("上書き保存", { exact: true }).click();
   await page.waitForFunction(() => document.querySelector("header .nav button.active") &&
-    document.querySelector("header .nav button.active").textContent.includes("一覧"), { timeout: 8000 });
+    document.querySelector("header .nav button.active").textContent.includes("カレンダー"), { timeout: 8000 });
   await page.waitForSelector(".rec .txt", { timeout: 8000 });
   // Wait for the overwrite to reflect in the list (guards any refresh timing).
   let markerSeen = true;
@@ -685,7 +692,7 @@ async function main() {
   // Overwrite persists across reload as the same single record (no dup entry).
   await page.reload({ waitUntil: "load" });
   await page.waitForSelector("header h1", { timeout: 10000 });
-  await page.getByText("一覧", { exact: true }).click();
+  await page.getByText("カレンダー", { exact: true }).click();
   await openDayWithRecords();
   const overwritePersisted = await page.evaluate(() => ({
     count: document.querySelectorAll(".rec").length,

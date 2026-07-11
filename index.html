@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-ELIfEMYPLq4G1htw2hpUjc9Uvx0lzHvbsIQss1TgFsc=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-ibr0jWoE1I/Uo49ZFfuYjKuSy3DWu6Yrw/pBuA+DOY8='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-ZzjhqdEsQmrgc+GDTyw3xHKiNTF2X/JNz/o+/5TfNds=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-LGWwI9UBhJFDVWB8xeIUQ0wKrtiNBwZ/vcKKxZf71d8='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
 <title>ラベルOCR</title>
 <style>
 :root{
@@ -110,10 +110,15 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
 .preview.compact{ max-height:22svh; }
 .cal{ background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
   padding:12px; margin-bottom:14px; }
-.calhead{ display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
-.calhead .mlabel{ font-weight:700; font-size:15px; }
-.calnav{ min-width:44px; min-height:44px; border:1px solid var(--line); background:var(--panel2);
-  color:var(--fg); border-radius:10px; font-size:18px; }
+/* 月/日の移動はナビゲーション機能なので、主要ボタンではなく小さなリンク調に。 */
+.navrow{ display:flex; align-items:center; gap:8px; margin:0 0 10px; }
+.navrow .navlabel{ flex:1; text-align:center; font-weight:700; font-size:15px; }
+.navrow .navbtn{ background:transparent; border:none; color:var(--accent); font-weight:700;
+  font-size:13px; min-height:36px; padding:4px 6px; white-space:nowrap; }
+.navrow .navbtn:disabled{ color:var(--muted); opacity:.45; }
+.daylinkrow{ text-align:center; margin:-2px 0 12px; }
+.daylink{ background:transparent; border:none; color:var(--accent); font-size:13px;
+  font-weight:700; min-height:32px; padding:4px 8px; text-decoration:underline; }
 .calgrid{ display:grid; grid-template-columns:repeat(7,1fr); gap:4px; }
 .caldow{ text-align:center; font-size:12px; color:var(--muted); padding:4px 0; }
 .calcell{ position:relative; aspect-ratio:1/1; border:1px solid transparent; border-radius:9px;
@@ -185,9 +190,6 @@ details.acc .hint{ margin-top:0; }
 .ocr-modal .card{ margin-bottom:0; }
 /* The three actions sit in one row; shrink text + nowrap so they fit at 375px. */
 .btn-row.triple .btn{ font-size:13px; padding:0 2px; white-space:nowrap; }
-/* List: calendar-only screen has a bottom action row; day/all screens a top bar. */
-.listbar{ display:flex; gap:10px; margin:0 0 12px; }
-.listbar .btn{ flex:1; }
 .lightbox{ position:fixed; inset:0; z-index:100; background:rgba(0,0,0,.88);
   display:flex; align-items:center; justify-content:center; padding:16px; cursor:zoom-out; }
 .lightbox img{ max-width:100%; max-height:100%; object-fit:contain; border-radius:8px; }
@@ -2076,10 +2078,10 @@ details.acc .hint{ margin-top:0; }
       function renderCalendar() {
         const dow = ["日", "月", "火", "水", "木", "金", "土"];
         return h("div", { class: "cal" }, [
-          h("div", { class: "calhead" }, [
-            h("button", { class: "calnav", onClick: prevMonth, "aria-label": "前の月" }, "‹"),
-            h("div", { class: "mlabel" }, calY.value + "年 " + (calM.value + 1) + "月"),
-            h("button", { class: "calnav", onClick: nextMonth, "aria-label": "次の月" }, "›")
+          h("div", { class: "navrow" }, [
+            h("button", { class: "navbtn", onClick: prevMonth, "aria-label": "前の月" }, "← 前の月"),
+            h("div", { class: "navlabel" }, calY.value + "年 " + (calM.value + 1) + "月"),
+            h("button", { class: "navbtn", onClick: nextMonth, "aria-label": "次の月" }, "次の月 →")
           ]),
           h("div", { class: "calgrid" }, [
             ...dow.map((d) => h("div", { class: "caldow", key: "dow" + d }, d)),
@@ -2100,9 +2102,25 @@ details.acc .hint{ margin-top:0; }
         ]);
       }
 
-      function toCalendar() { listView.value = "calendar"; filterDate.value = null; }
       // 表示中の月の全記録を日毎リストで表示（filterDate は解除、月は calY/calM）。
       function showMonth() { listView.value = "month"; filterDate.value = null; }
+
+      // 記録がある日付（昇順）。日ビューの ←前の日 / 次の日→ で行き来する。
+      const recordDays = computed(() => {
+        const set = {};
+        for (const r of records.value) set[r.dateKey] = true;
+        return Object.keys(set).sort();
+      });
+      function gotoAdjacentDay(delta) {
+        const days = recordDays.value;
+        const i = days.indexOf(filterDate.value);
+        const j = i + delta;
+        if (i < 0 || j < 0 || j >= days.length) return;
+        const key = days[j];
+        filterDate.value = key;
+        const p = key.split("-");
+        calY.value = +p[0]; calM.value = +p[1] - 1;   // カレンダーも同月へ同期
+      }
 
       function renderGroups(groups) {
         return groups.length === 0
@@ -2120,21 +2138,31 @@ details.acc .hint{ margin-top:0; }
         if (listView.value === "calendar") {
           return h("div", {}, [err, renderCalendar()]);
         }
-        // 'day'(その日) / 'month'(表示中の月の全記録)。
-        const isMonth = listView.value === "month";
-        const groups = isMonth ? monthGroups.value : visibleGroups.value;
+        // 月ビュー: 表示中の月の全記録を日毎に。戻るは上部の「カレンダー」タブ。
+        if (listView.value === "month") {
+          return h("div", {}, [
+            err,
+            h("div", { class: "monthhdr" }, calY.value + "年 " + (calM.value + 1) + "月の記録"),
+            renderGroups(monthGroups.value)
+          ]);
+        }
+        // 日ビュー: ←前の日 / 日付 / 次の日→ で記録のある日を行き来。
+        const days = recordDays.value;
+        const i = days.indexOf(filterDate.value);
+        const dayItems = (visibleGroups.value[0] && visibleGroups.value[0].items) || [];
         return h("div", {}, [
           err,
-          h("div", { class: "listbar" }, [
-            h("button", { class: "btn sec", onClick: toCalendar }, "‹ カレンダー"),
-            listView.value === "day"
-              ? h("button", { class: "btn sec", onClick: showMonth }, "この月の記録")
-              : null
+          h("div", { class: "navrow" }, [
+            h("button", { class: "navbtn", disabled: i <= 0, onClick: () => gotoAdjacentDay(-1), "aria-label": "前の日" }, "← 前の日"),
+            h("div", { class: "navlabel" }, dateHeaderLabel(filterDate.value)),
+            h("button", { class: "navbtn", disabled: i < 0 || i >= days.length - 1, onClick: () => gotoAdjacentDay(1), "aria-label": "次の日" }, "次の日 →")
           ]),
-          isMonth
-            ? h("div", { class: "monthhdr" }, calY.value + "年 " + (calM.value + 1) + "月の記録")
-            : null,
-          renderGroups(groups)
+          h("div", { class: "daylinkrow" }, [
+            h("button", { class: "daylink", onClick: showMonth }, "この月の記録")
+          ]),
+          dayItems.length
+            ? h("div", {}, dayItems.map(renderRecord))
+            : h("div", { class: "empty-note" }, "この日の記録はありません。")
         ]);
       }
 
@@ -2149,7 +2177,7 @@ details.acc .hint{ margin-top:0; }
           h("h1", {}, ["ラベルOCR", h("span", { class: "ver" }, APP_VERSION)]),
           h("div", { class: "nav" }, [
             h("button", { class: view.value === "capture" ? "active" : "", onClick: () => goTab("capture") }, "撮影"),
-            h("button", { class: view.value === "list" ? "active" : "", onClick: () => goTab("list") }, "一覧")
+            h("button", { class: view.value === "list" ? "active" : "", onClick: () => goTab("list") }, "カレンダー")
           ])
         ]),
         h("main", {}, view.value === "capture" ? renderInput() : renderList()),
