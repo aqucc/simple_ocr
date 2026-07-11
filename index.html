@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-NGDdPvGN0CLpMuYEYFOlJymtwG+NAS+M/kuL5MooSx4=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-RXgCM19nhJSHNnTSBR79MkZUu1994bI4ahUr0aSYJq8='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-a1ebjh1NBE9lEBBcSDunR0/gh2Igfd5YWCEbz18r2MA=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-e/UdbrFOdqpNzMKLnQ6JvtiAWPlGmQI2o4QtOFCxdnw='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
 <title>ラベルOCR</title>
 <style>
 :root{
@@ -16,9 +16,12 @@
 *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
 html,body{ margin:0; padding:0; background:var(--bg); color:var(--fg);
   font-family:-apple-system,BlinkMacSystemFont,"Hiragino Kaku Gothic ProN","Yu Gothic",Meiryo,sans-serif;
-  font-size:16px; line-height:1.5; }
-#app{ max-width:680px; margin:0 auto; min-height:100svh; display:flex; flex-direction:column; }
-header{ position:sticky; top:0; z-index:10; background:var(--panel);
+  font-size:16px; line-height:1.5; overscroll-behavior:none; }
+#app{ max-width:680px; margin:0 auto; }
+/* App shell: exactly one viewport tall, non-scrolling. Only <main> scrolls
+   (records list); everything else is fixed height. Kills iOS rubber-band. */
+.shell{ height:100svh; display:flex; flex-direction:column; overflow:hidden; }
+header{ position:relative; z-index:10; background:var(--panel); flex:0 0 auto;
   border-bottom:1px solid var(--line);
   padding:calc(env(safe-area-inset-top) + 8px) 12px 8px; }
 header h1{ font-size:17px; margin:0 0 8px; text-align:center; font-weight:700; }
@@ -27,7 +30,8 @@ header h1 .ver{ font-size:10px; font-weight:400; color:var(--muted); margin-left
 .nav button{ flex:1; min-height:44px; border:1px solid var(--line); background:var(--panel2);
   color:var(--fg); border-radius:10px; font-size:15px; font-weight:600; }
 .nav button.active{ background:var(--accent); border-color:var(--accent); color:#fff; }
-main{ flex:1; min-height:0; padding:12px 12px calc(env(safe-area-inset-bottom) + 14px); }
+main{ flex:1 1 auto; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch;
+  overscroll-behavior:contain; padding:12px 12px calc(env(safe-area-inset-bottom) + 14px); }
 .card{ background:var(--panel); border:1px solid var(--line); border-radius:var(--radius);
   padding:14px; margin-bottom:14px; }
 .btn{ display:flex; align-items:center; justify-content:center; gap:8px;
@@ -156,6 +160,25 @@ details.acc summary::before{ content:"▸"; font-size:11px; transition:transform
 details.acc[open] summary::before{ transform:rotate(90deg); }
 details.acc .hint{ margin-top:0; }
 .rec .thumb{ cursor:zoom-in; }
+/* Recognition function: a full-screen modal (dialog) over the app. It carries
+   no 撮影/一覧 tabs -- recognition is its own focused task with its own close (✕)
+   and cancel. Fixed height, non-scrolling body (image is height-capped). */
+.ocr-modal{ position:fixed; inset:0; z-index:60; background:var(--bg);
+  display:flex; flex-direction:column; overflow:hidden; padding:0 0 env(safe-area-inset-bottom); }
+.ocr-modal .modalbar{ flex:0 0 auto; display:flex; align-items:center; justify-content:space-between;
+  padding:calc(env(safe-area-inset-top) + 8px) 8px 8px 14px; border-bottom:1px solid var(--line);
+  background:var(--panel); }
+.ocr-modal .modalbar .mtitle{ font-size:15px; font-weight:700; }
+.ocr-modal .modalclose{ min-width:40px; min-height:40px; border:none; border-radius:10px;
+  background:transparent; color:var(--fg); font-size:20px; line-height:1; }
+.ocr-modal .modalbody{ flex:1 1 auto; min-height:0; overflow-y:auto; overscroll-behavior:contain;
+  display:flex; flex-direction:column; padding:12px; }
+.ocr-modal .card{ margin-bottom:0; }
+/* The three read/cancel actions sit in one row; shrink text so they fit at 375px. */
+.btn-row.triple .btn{ font-size:14px; padding:0 4px; }
+/* List: calendar-only screen has a bottom action row; day/all screens a top bar. */
+.listbar{ display:flex; gap:10px; margin:0 0 12px; }
+.listbar .btn{ flex:1; }
 .lightbox{ position:fixed; inset:0; z-index:100; background:rgba(0,0,0,.88);
   display:flex; align-items:center; justify-content:center; padding:16px; cursor:zoom-out; }
 .lightbox img{ max-width:100%; max-height:100%; object-fit:contain; border-radius:8px; }
@@ -1384,6 +1407,7 @@ details.acc .hint{ margin-top:0; }
       // これで決まる(capture→撮影に破棄、list→一覧に戻る)。
       const ocrOrigin = ref("capture");
       const ocrTargetRec = ref(null);       // 再認識で上書きする対象レコード
+      const ocrActive = ref(false);         // 認識機能をモーダル(ダイアログ)表示中か
       const toast = ref("");
       let toastTimer = null;
       function showToast(msg) {
@@ -1431,9 +1455,10 @@ details.acc .hint{ margin-top:0; }
         if (!b || !b.w || !b.h) return null;
         const appW = Math.min(viewport.value.w, 680);
         const maxW = Math.max(120, appW - 54);   // 主内容: main(12)+card(14)+境界 の左右
-        // ~33% of the viewport height keeps a tall (portrait) image from forcing
-        // a scroll on iPhone SE2 while staying large enough to crop comfortably.
-        const maxH = Math.max(140, Math.round(viewport.value.h * 0.33));
+        // Cap the image to a fraction of the viewport height so a tall (portrait)
+        // image can't force a scroll inside the recognition modal on iPhone SE2,
+        // while staying large enough to crop comfortably.
+        const maxH = Math.max(140, Math.round(viewport.value.h * 0.42));
         const scale = Math.min(maxW / b.w, maxH / b.h, 1);
         return { w: Math.round(b.w * scale), h: Math.round(b.h * scale) };
       });
@@ -1442,6 +1467,9 @@ details.acc .hint{ margin-top:0; }
       const records = ref([]);
       const listErr = ref("");
       const filterDate = ref(null);
+      // 一覧の表示モード: 'calendar'=カレンダーのみ / 'day'=選択日のリスト /
+      // 'all'=全日の日毎リスト。一覧に入るとまずカレンダーのみ。
+      const listView = ref("calendar");
       const today = new Date();
       const calY = ref(today.getFullYear());
       const calM = ref(today.getMonth());   // 0-based
@@ -1470,9 +1498,9 @@ details.acc .hint{ margin-top:0; }
           cropMode.value = "rect"; quadCorners.value = null;
           ocrText.value = ""; ocrRawText.value = ""; ocrFilteredText.value = "";
           ocrConf.value = null; engineUsed.value = "";
-          // 撮影/選択/貼り付け→認識機能へ必ず遷移(範囲選択から)。
+          // 撮影/選択/貼り付け→認識機能(モーダル)へ必ず遷移(範囲選択から)。
           stage.value = "crop";
-          view.value = "ocr";
+          ocrActive.value = true;
         } catch (e) {
           captureErr.value = "画像の読み込みに失敗しました: " + (e && e.message ? e.message : e);
           stage.value = "input";
@@ -1677,17 +1705,20 @@ details.acc .hint{ margin-top:0; }
       async function saveRecord() {
         try {
           const target = ocrTargetRec.value;
+          let landedKey;
           if (target) {
             // 一覧からの再認識: 同じレコードを上書き。id/createdAt/dateKey と
             // 元画像はそのまま保持し、テキストだけ差し替える(カレンダーに
             // 新規エントリを増やさない)。
             await dbPut(Object.assign({}, target, { text: ocrText.value }));
+            landedKey = target.dateKey;
           } else {
             const now = new Date();
+            landedKey = localDateKey(now);
             await dbPut({
               id: (now.getTime() + "-" + Math.random().toString(36).slice(2, 8)),
               createdAt: now.toISOString(),
-              dateKey: localDateKey(now),
+              dateKey: landedKey,
               text: ocrText.value,
               imageDataUrl: previewUrl.value
             });
@@ -1695,8 +1726,12 @@ details.acc .hint{ margin-top:0; }
           await refreshRecords();
           resetOcrState();
           ocrTargetRec.value = null;
+          ocrActive.value = false;
           showToast(target ? "更新しました" : "保存しました");
+          // 保存直後は該当日のリスト(その記録が見える)を表示。
           view.value = "list";
+          listView.value = "day";
+          filterDate.value = landedKey;
         } catch (e) {
           captureErr.value = "保存に失敗しました: " + (e && e.message ? e.message : e);
         }
@@ -1715,6 +1750,7 @@ details.acc .hint{ margin-top:0; }
         resetOcrState();
         const origin = ocrOrigin.value;
         ocrTargetRec.value = null;
+        ocrActive.value = false;
         view.value = origin === "list" ? "list" : "capture";
       }
       function backToCrop() {
@@ -1892,11 +1928,10 @@ details.acc .hint{ margin-top:0; }
             h("div", { class: "hint" }, isQuad
               ? "四隅をラベルの角に合わせます。"
               : "読みたい行だけを枠で囲むと精度が上がります。"),
-            h("div", { class: "btn-row", style: { marginTop: "10px" } }, [
-              h("button", { class: "btn", onClick: () => runOcr(true) }, "この範囲を読み取る")
-            ]),
-            h("div", { class: "btn-row", style: { marginTop: "10px" } }, [
-              h("button", { class: "btn sec", onClick: () => runOcr(false) }, "全体を読み取る"),
+            // 指定範囲 / 全体読取 / キャンセル(やり直す) を横1列に。
+            h("div", { class: "btn-row triple", style: { marginTop: "10px" } }, [
+              h("button", { class: "btn", onClick: () => runOcr(true) }, "指定範囲"),
+              h("button", { class: "btn sec", onClick: () => runOcr(false) }, "全体読取"),
               h("button", { class: "btn sec", onClick: cancelOcr },
                 ocrOrigin.value === "list" ? "キャンセル" : "やり直す")
             ])
@@ -1964,16 +1999,23 @@ details.acc .hint{ margin-top:0; }
         ]);
       }
 
-      // 撮影タブ: 入力(カメラ/選択/貼り付け + 認識モード)のみ。
-      function renderCapture() {
-        return renderInput();
-      }
-      // 認識機能(独立フロー): 範囲選択→認識中→結果。撮影/一覧のどちらから
-      // 入ってもここを通り、キャンセル先と保存挙動は ocrOrigin で決まる。
-      function renderOcr() {
+      // 認識機能の中身(範囲選択→認識中→結果)。モーダル内に描画する。
+      function renderOcrBody() {
         if (stage.value === "processing") return renderProcessing();
         if (stage.value === "result") return renderResult();
         return renderCrop();
+      }
+      // 認識機能はメインタブ(撮影/一覧)を持たない独立モーダル(ダイアログ)。
+      // ✕ はキャンセル(入口へ戻る)。
+      function renderOcrModal() {
+        const title = ocrTargetRec.value ? "再読み取り" : "読み取り";
+        return h("div", { class: "ocr-modal" }, [
+          h("div", { class: "modalbar" }, [
+            h("span", { class: "mtitle" }, title),
+            h("button", { class: "modalclose", onClick: cancelOcr, "aria-label": "閉じる" }, "✕")
+          ]),
+          h("div", { class: "modalbody" }, renderOcrBody())
+        ]);
       }
 
       function renderRecord(rec) {
@@ -2035,7 +2077,7 @@ details.acc .hint{ margin-top:0; }
               const day = +key.split("-")[2];
               return h("div", {
                 class: cls, key: key,
-                onClick: () => { if (cnt) filterDate.value = (filterDate.value === key ? null : key); }
+                onClick: () => { if (cnt) { filterDate.value = key; listView.value = "day"; } }
               }, [
                 String(day),
                 cnt ? h("span", { class: "caldot" }, String(cnt)) : null
@@ -2045,49 +2087,55 @@ details.acc .hint{ margin-top:0; }
         ]);
       }
 
+      function toCalendar() { listView.value = "calendar"; filterDate.value = null; }
+      function showAllDays() { listView.value = "all"; filterDate.value = null; }
+
+      function renderGroups(groups) {
+        return groups.length === 0
+          ? h("div", { class: "empty-note" }, "保存された記録はありません。")
+          : groups.map((g) =>
+              h("div", { key: g.key }, [
+                h("div", { class: "datehdr", style: { marginTop: "0" } }, dateHeaderLabel(g.key)),
+                ...g.items.map(renderRecord)
+              ]));
+      }
+
       function renderList() {
+        const err = listErr.value ? h("div", { class: "err" }, listErr.value) : null;
+        // カレンダーのみ画面。日をタップするとその日のリストへ。
+        if (listView.value === "calendar") {
+          return h("div", {}, [err, renderCalendar()]);
+        }
+        // 'day'(filterDate で1日に絞り込み) / 'all'(filterDate=null で全日)。
+        // visibleGroups が filterDate に応じて絞り込み済み。
         return h("div", {}, [
-          listErr.value ? h("div", { class: "err" }, listErr.value) : null,
-          renderCalendar(),
-          filterDate.value
-            ? h("button", { class: "btn sec", style: { marginBottom: "12px" }, onClick: () => { filterDate.value = null; } },
-                dateHeaderLabel(filterDate.value) + " のみ表示中 — すべて表示")
-            : null,
-          visibleGroups.value.length === 0
-            ? h("div", { class: "empty-note" }, "保存された記録はありません。")
-            : visibleGroups.value.map((g) =>
-                h("div", { key: g.key }, [
-                  h("div", { class: "datehdr" }, dateHeaderLabel(g.key)),
-                  ...g.items.map(renderRecord)
-                ])
-              )
+          err,
+          h("div", { class: "listbar" }, [
+            h("button", { class: "btn sec", onClick: toCalendar }, "‹ カレンダー"),
+            listView.value === "day"
+              ? h("button", { class: "btn sec", onClick: showAllDays }, "日毎リストのみ")
+              : null
+          ]),
+          renderGroups(visibleGroups.value)
         ]);
       }
 
-      // メインタブは撮影/一覧の2つ。認識機能(view='ocr')は独立フローで、
-      // タブとしては見せない。認識中は開いた側(ocrOrigin)のタブをハイライト
-      // し、タブを押すと認識を中断して移動する。
+      // メインタブは撮影/一覧の2つ。認識機能は独立モーダルなのでタブに出さない。
       function goTab(tab) {
-        if (view.value === "ocr") { resetOcrState(); ocrTargetRec.value = null; }
         view.value = tab;
-        if (tab === "list") refreshRecords();
+        if (tab === "list") { listView.value = "calendar"; filterDate.value = null; refreshRecords(); }
       }
-      const captureTabActive = () =>
-        view.value === "capture" || (view.value === "ocr" && ocrOrigin.value === "capture");
-      const listTabActive = () =>
-        view.value === "list" || (view.value === "ocr" && ocrOrigin.value === "list");
 
-      return () => h("div", {}, [
+      return () => h("div", { class: "shell" }, [
         h("header", {}, [
           h("h1", {}, ["ラベルOCR", h("span", { class: "ver" }, APP_VERSION)]),
           h("div", { class: "nav" }, [
-            h("button", { class: captureTabActive() ? "active" : "", onClick: () => goTab("capture") }, "撮影"),
-            h("button", { class: listTabActive() ? "active" : "", onClick: () => goTab("list") }, "一覧")
+            h("button", { class: view.value === "capture" ? "active" : "", onClick: () => goTab("capture") }, "撮影"),
+            h("button", { class: view.value === "list" ? "active" : "", onClick: () => goTab("list") }, "一覧")
           ])
         ]),
-        h("main", {}, view.value === "capture" ? renderCapture()
-          : view.value === "ocr" ? renderOcr()
-          : renderList()),
+        h("main", {}, view.value === "capture" ? renderInput() : renderList()),
+        ocrActive.value ? renderOcrModal() : null,
         lightboxUrl.value
           ? h("div", { class: "lightbox", onClick: () => { lightboxUrl.value = ""; } }, [
               h("img", { src: lightboxUrl.value, alt: "保存した画像" }),

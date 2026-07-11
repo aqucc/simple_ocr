@@ -152,7 +152,7 @@ async function main() {
   const cspViolations = [];
   const unmappedCdn = [];
   // Every jsdelivr basename fulfilled from cache, in request order — lets a test
-  // assert e.g. that the classic 「全体を読み取る」 path fetched the DBNet det
+  // assert e.g. that the classic 「全体読取」 path fetched the DBNet det
   // model (a cropped read never does).
   const cdnHits = [];
   const countDet = () => cdnHits.filter((nm) => nm === "ch_PP-OCRv4_det_infer.onnx").length;
@@ -235,24 +235,41 @@ async function main() {
   // the day's record list allowed to scroll below it.
   const SE2 = { width: 375, height: 553 };   // SE2/SE3 Safari usable area
   const BIG = { width: 1280, height: 900 };
-  async function checkSE2(name, mode) {
+  // The app is a fixed-height shell: <main> (records) is the only scroll region,
+  // and the recognition modal's .modalbody is its own. So the "no vertical
+  // scroll" gate measures the given container's own scrollHeight vs clientHeight
+  // (the document itself never scrolls). `sel` is that container. For the
+  // calendar we additionally require the calendar card to fit inside <main>.
+  async function checkSE2(name, sel, mode) {
     await page.setViewportSize(SE2);
-    await page.waitForTimeout(140);           // let the resize listener re-render
-    const m = await page.evaluate(() => {
+    await page.waitForTimeout(150);           // let the resize listener re-render
+    const m = await page.evaluate((sel) => {
+      const el = document.querySelector(sel);
       const de = document.documentElement;
       const cal = document.querySelector(".cal");
       return {
-        sh: de.scrollHeight, ih: window.innerHeight, iw: window.innerWidth, sw: de.scrollWidth,
+        found: !!el,
+        sh: el ? el.scrollHeight : 0, ch: el ? el.clientHeight : 0,
+        dsw: de.scrollWidth, iw: window.innerWidth, ih: window.innerHeight,
         calBottom: cal ? Math.round(cal.getBoundingClientRect().bottom) : null
       };
-    });
-    const horiz = m.sw - m.iw;
-    const vert = mode === "cal" ? (m.calBottom == null ? 0 : m.calBottom - m.ih) : (m.sh - m.ih);
-    log("SE2[" + name + "]: doc " + m.sw + "x" + m.sh + " vp " + m.iw + "x" + m.ih +
-      (mode === "cal" ? " calBottom=" + m.calBottom : "") + " -> vOverflow=" + vert + "px hOverflow=" + horiz + "px");
+    }, sel);
+    if (!m.found) { await page.setViewportSize(BIG); return fail("SE2 gate '" + name + "': container '" + sel + "' not found."); }
+    const horiz = m.dsw - m.iw;
+    const vert = mode === "cal" ? (m.calBottom == null ? 0 : m.calBottom - m.ih) : (m.sh - m.ch);
+    log("SE2[" + name + "] " + sel + ": scrollH=" + m.sh + " clientH=" + m.ch +
+      (mode === "cal" ? " calBottom=" + m.calBottom + "/" + m.ih : "") + " -> vOverflow=" + vert + "px hOverflow=" + horiz + "px");
     if (horiz > 2) { await page.setViewportSize(BIG); return fail("SE2 gate '" + name + "': horizontal overflow " + horiz + "px."); }
     if (vert > 2) { await page.setViewportSize(BIG); return fail("SE2 gate '" + name + "': vertical overflow " + vert + "px (must fit without scroll)."); }
     await page.setViewportSize(BIG);
+  }
+
+  // From the 一覧 calendar screen, open the first day that has records so the
+  // record list (.rec) is visible (records are hidden in calendar-only mode).
+  async function openDayWithRecords() {
+    await page.waitForSelector(".calcell.has", { timeout: 8000 });
+    await page.click(".calcell.has");
+    await page.waitForSelector(".rec .txt", { timeout: 8000 });
   }
 
   // Recognition mode is chosen on the crop screen now (英数字/日本語 segctl),
@@ -291,7 +308,7 @@ async function main() {
   log("Step 1b: capture-screen 'モードと撮影のコツ' accordion collapsed by default; reveals mode + jpn download hint.");
 
   // SE2 no-scroll gate: capture screen.
-  await checkSE2("capture", "full");
+  await checkSE2("capture", "main");
 
   // SE2 no-scroll gate: recognition (crop) screen with a TALL portrait image
   // (exercises the height cap that keeps the stage from forcing a scroll).
@@ -310,7 +327,7 @@ async function main() {
     }, "image/png"));
   });
   await page.waitForSelector(".crop-stage", { timeout: 10000 });
-  await checkSE2("crop-portrait", "full");
+  await checkSE2("crop-portrait", ".modalbody");
   await page.getByText("やり直す", { exact: true }).click();
   await page.waitForSelector(".card", { timeout: 8000 });
   log("Step 1c: SE2 no-scroll verified on the capture screen and a portrait-image crop screen.");
@@ -334,12 +351,12 @@ async function main() {
   });
   log("Step 2: label image injected, crop stage should appear...");
   await page.waitForSelector(".crop-stage", { timeout: 10000 });
-  await checkSE2("crop-landscape", "full");
+  await checkSE2("crop-landscape", ".modalbody");
 
   // ---- cropped 英数字 path -> PaddleOCR (rec-only) ----
   await expandCropToFull();
   log("Step 2b: crop rect expanded to full photo via pointer-event drags.");
-  await page.getByText("この範囲を読み取る", { exact: true }).click();
+  await page.getByText("指定範囲", { exact: true }).click();
   const assertResult = async (label, reKx, reOther) => {
     try {
       await page.waitForSelector("textarea", { timeout: 180000 });
@@ -435,13 +452,13 @@ async function main() {
   log("Step 3: cropped-region OCR via " + engine1 + " matched. Recognized:\n  " + recognized.replace(/\n/g, "\\n"));
 
   // SE2 no-scroll gate: recognition RESULT screen (flex-fill card).
-  await checkSE2("result", "full");
+  await checkSE2("result", ".modalbody");
 
   if (cspViolations.length) return fail("CSP violation(s) occurred during Paddle OCR.");
   const cspFromPage = await page.evaluate(() => window.__csp || []);
   if (cspFromPage.length) { cspViolations.push(...cspFromPage); return fail("securitypolicyviolation events fired."); }
 
-  // ---- full-image 全体を読み取る — DBNet detection + rec ----
+  // ---- full-image 全体読取 — DBNet detection + rec ----
   // Helper: inject an in-page multi-line label (3 lines). Used by the full-image
   // read below and by the cold-start guard after a reload.
   async function injectMultiLineLabel(filename) {
@@ -472,25 +489,25 @@ async function main() {
   await injectMultiLineLabel("multiline-label.png");
   await page.waitForSelector(".crop-stage", { timeout: 10000 });
 
-  // 「全体を読み取る」 runs DBNet detection to find every text line, crops each,
+  // 「全体読取」 runs DBNet detection to find every text line, crops each,
   // and recognizes it. ORT is already warm (the cropped read above loaded the
   // rec model); this read additionally loads the DBNet det model.
   const detBeforeClassic = countDet();
-  await page.getByText("全体を読み取る", { exact: true }).click();
+  await page.getByText("全体読取", { exact: true }).click();
   await assertResult("Paddle-det-full", "KX[-—_ ]?1234AB", "98765");
   const engine2 = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
   if (!/PaddleOCR/.test(engine2)) return fail("Expected PaddleOCR engine for full-image (det+rec) path, got: " + engine2);
   if (countDet() <= detBeforeClassic) {
-    return fail("Full-image 全体を読み取る should have loaded the DBNet det model, but det request count did not increase (" +
+    return fail("Full-image 全体読取 should have loaded the DBNet det model, but det request count did not increase (" +
       detBeforeClassic + " -> " + countDet() + ").");
   }
-  log("Step 3a: full-image 全体を読み取る OCR via DBNet detection + " + engine2 + " matched (det count " + detBeforeClassic + " -> " + countDet() + ").");
+  log("Step 3a: full-image 全体読取 OCR via DBNet detection + " + engine2 + " matched (det count " + detBeforeClassic + " -> " + countDet() + ").");
 
   if (cspViolations.length) return fail("CSP violation(s) occurred during full-image OCR.");
   const cspFull = await page.evaluate(() => window.__csp || []);
   if (cspFull.length) { cspViolations.push(...cspFull); return fail("securitypolicyviolation during full-image OCR."); }
 
-  // ---- cold-start guard: 全体を読み取る as the FIRST OCR after a reload ----
+  // ---- cold-start guard: 全体読取 as the FIRST OCR after a reload ----
   // Regression guard for c8863b5: after a cold reload (window.ort not yet
   // warmed), paddleRecognizeFull must load ORT via getDet BEFORE reading
   // window.ort; otherwise this crashes with "Cannot read properties of
@@ -500,49 +517,64 @@ async function main() {
   await page.waitForSelector("header h1", { timeout: 10000 });
   await injectMultiLineLabel("multiline-label-2.png");
   await page.waitForSelector(".crop-stage", { timeout: 10000 });
-  await page.getByText("全体を読み取る", { exact: true }).click();
+  await page.getByText("全体読取", { exact: true }).click();
   await assertResult("classic-full-cold-start", "KX[-—_ ]?1234AB", "98765");
   log("Step 3b: full-image read works as the first OCR after reload (cold ORT).");
   await page.getByText("範囲を選び直す", { exact: true }).click();
   await page.waitForSelector(".crop-stage", { timeout: 10000 });
   await expandCropToFull();
-  await page.getByText("この範囲を読み取る", { exact: true }).click();
+  await page.getByText("指定範囲", { exact: true }).click();
   await assertResult("Paddle-crop-postreload", "KX[-—_ ]?1234AB", "98765");
 
-  // Save the record.
+  // Save the record. Lands on the 一覧 'day' view (the saved record's day),
+  // where the record is visible; the calendar is not shown in day view.
   await page.getByText("保存する", { exact: true }).click();
   await page.waitForFunction(() => document.querySelector("header .nav button.active") &&
     document.querySelector("header .nav button.active").textContent.includes("一覧"), { timeout: 8000 });
+  await page.waitForSelector(".rec .txt", { timeout: 8000 });
 
   const now = new Date();
-  const pad = (n) => (n < 10 ? "0" + n : "" + n);
   const todayHdrDay = now.getFullYear() + "年" + (now.getMonth() + 1) + "月" + now.getDate() + "日";
-
-  const listOk = await page.evaluate((hdrDay) => {
+  const dayViewOk = await page.evaluate((hdrDay) => {
     const hdrs = [...document.querySelectorAll(".datehdr")].map((e) => e.textContent);
-    const hasToday = hdrs.some((h) => h.startsWith(hdrDay));
     const recText = [...document.querySelectorAll(".rec .txt")].map((e) => e.textContent).join("\n");
-    const badge = !!document.querySelector(".calcell.has .caldot");
-    return { hasToday, hasText: /KX/i.test(recText) && /98765/.test(recText), badge };
+    return { hasToday: hdrs.some((h) => h.startsWith(hdrDay)), hasText: /KX/i.test(recText) && /98765/.test(recText) };
   }, todayHdrDay);
-  if (!listOk.hasToday) return fail("Saved record not shown under today's date header (" + todayHdrDay + ").");
-  if (!listOk.hasText) return fail("Saved record text not found in list.");
-  if (!listOk.badge) return fail("Calendar badge (.caldot) not shown for a day with records.");
-  log("Step 4: record listed under today (" + todayHdrDay + ") and calendar shows a badge.");
+  if (!dayViewOk.hasToday) return fail("Saved record not shown under today's date header (" + todayHdrDay + ") in the day view.");
+  if (!dayViewOk.hasText) return fail("Saved record text not found in the day view after saving.");
+  log("Step 4: after 保存, landed on the 一覧 day view showing today's record (" + todayHdrDay + ").");
 
+  // 「‹ カレンダー」 -> calendar-only screen: badge on the day + SE2 gate.
+  await page.getByText("‹ カレンダー", { exact: true }).click();
+  await page.waitForSelector(".cal", { timeout: 8000 });
+  const badge = await page.evaluate(() => !!document.querySelector(".calcell.has .caldot"));
+  if (!badge) return fail("Calendar badge (.caldot) not shown for a day with records.");
+  log("Step 4a: 「‹ カレンダー」 shows the calendar-only screen with a day badge.");
   // SE2 gate: the calendar must be fully visible without scrolling (records
-  // below it are allowed to scroll).
-  await checkSE2("calendar", "cal");
+  // below/behind it are allowed to scroll in day/all views).
+  await checkSE2("calendar", "main", "cal");
 
-  // Reload -> persistence.
+  // List-mode transitions: カレンダー → 日選択(day) → 日毎リストのみ(all) → カレンダー.
+  await openDayWithRecords();                                   // tap the day -> day view
+  await page.getByText("日毎リストのみ", { exact: true }).click();
+  await page.waitForSelector(".rec .txt", { timeout: 8000 });
+  const allViewOk = await page.evaluate(() =>
+    [...document.querySelectorAll(".rec .txt")].some((e) => /KX/i.test(e.textContent)) &&
+    !document.querySelector(".cal"));                           // 'all' shows records, no calendar
+  if (!allViewOk) return fail("「日毎リストのみ」view did not show records without the calendar.");
+  await page.getByText("‹ カレンダー", { exact: true }).click();
+  await page.waitForSelector(".cal", { timeout: 8000 });
+  log("Step 4b: 一覧のモード遷移 (カレンダー→日→日毎リストのみ→カレンダー) OK。");
+
+  // Reload -> persistence. Entering 一覧 shows the calendar; open the day.
   await page.reload({ waitUntil: "load" });
   await page.waitForSelector("header h1", { timeout: 10000 });
   await page.getByText("一覧", { exact: true }).click();
-  await page.waitForSelector(".rec .txt", { timeout: 8000 });
+  await openDayWithRecords();
   const persisted = await page.evaluate(() =>
     [...document.querySelectorAll(".rec .txt")].some((e) => /KX/i.test(e.textContent) && /98765/.test(e.textContent)));
   if (!persisted) return fail("Record did not persist across reload (IndexedDB).");
-  log("Step 5: record persisted across reload (IndexedDB).");
+  log("Step 5: record persisted across reload (IndexedDB); 一覧→カレンダー→日選択で表示。");
 
   // ---- edit flow: 編集 -> textarea (pre-filled) -> 保存 -> list + persistence ----
   await page.getByText("編集", { exact: true }).click();
@@ -571,7 +603,7 @@ async function main() {
   await page.reload({ waitUntil: "load" });
   await page.waitForSelector("header h1", { timeout: 10000 });
   await page.getByText("一覧", { exact: true }).click();
-  await page.waitForSelector(".rec .txt", { timeout: 8000 });
+  await openDayWithRecords();
   const editPersisted = await page.evaluate(() =>
     [...document.querySelectorAll(".rec .txt")].some((e) => /EDITED-999/.test(e.textContent)));
   if (!editPersisted) return fail("Edited record text did not persist across reload (IndexedDB).");
@@ -590,61 +622,67 @@ async function main() {
   log("Step 5c: thumbnail tap opened the lightbox; tap closed it.");
 
   // ---- re-OCR from a saved record (B案: overwrites the SAME record) ----
-  // 再読み取り enters the standalone recognition flow FROM the 一覧
-  // (origin=list). Recognition is not a main tab, so the 一覧 tab stays
-  // highlighted. キャンセル returns to the list unchanged; 上書き保存 overwrites
-  // the source record in place (same calendar entry, updated text) instead of
-  // creating a new record — the reported UX bug this fixes.
+  // 再読み取り opens the recognition MODAL from the 一覧 (origin=list). The modal
+  // carries no 撮影/一覧 tabs. キャンセル returns to the list unchanged; 上書き保存
+  // overwrites the source record in place (same calendar entry, updated text)
+  // instead of creating a new record — the reported UX bug this fixes.
   const recCountBefore = await page.evaluate(() => document.querySelectorAll(".rec").length);
 
-  // (a) cancel path: 再読み取り -> recognition flow (一覧 tab stays active) ->
-  //     キャンセル -> back to the list, record count unchanged.
+  // (a) cancel path: 再読み取り -> recognition modal -> キャンセル -> back to the
+  //     list, record count unchanged.
   await page.getByText("再読み取り", { exact: true }).click();
-  await page.waitForSelector(".crop-stage", { timeout: 10000 });
-  const listTabStillActive = await page.evaluate(() =>
-    document.querySelector("header .nav button.active").textContent.includes("一覧"));
-  if (!listTabStillActive) return fail("再読み取り should keep the 一覧 tab active (recognition is not a main tab; origin=list).");
+  await page.waitForSelector(".ocr-modal .crop-stage", { timeout: 10000 });
+  const modalHasTabs = await page.evaluate(() => !!document.querySelector(".ocr-modal .nav"));
+  if (modalHasTabs) return fail("Recognition modal must not contain 撮影/一覧 tabs.");
   await page.getByText("キャンセル", { exact: true }).click();
   await page.waitForSelector(".rec .txt", { timeout: 8000 });
   const afterCancelCount = await page.evaluate(() => document.querySelectorAll(".rec").length);
   if (afterCancelCount !== recCountBefore) {
     return fail("再認識のキャンセルでレコード数が変化した (" + recCountBefore + " -> " + afterCancelCount + ").");
   }
-  log("Step 5d: 再読み取り -> 認識機能(一覧タブ維持) -> キャンセルで一覧へ戻り、件数不変。");
+  log("Step 5d: 再読み取り -> 認識モーダル(タブなし) -> キャンセルで一覧へ戻り、件数不変。");
 
   // (b) overwrite path: 再読み取り -> read -> tag text -> 上書き保存 ->
   //     the SAME record is updated (count unchanged, marker text present).
   await page.getByText("再読み取り", { exact: true }).click();
-  await page.waitForSelector(".crop-stage", { timeout: 10000 });
+  await page.waitForSelector(".ocr-modal .crop-stage", { timeout: 10000 });
   await expandCropToFull();
-  await page.getByText("この範囲を読み取る", { exact: true }).click();
+  await page.getByText("指定範囲", { exact: true }).click();
   await assertResult("Re-OCR-from-saved", "KX[-—_ ]?1234AB", "98765");
   const overwriteBtnCount = await page.getByText("上書き保存", { exact: true }).count();
   if (overwriteBtnCount < 1) return fail("再認識の結果画面に「上書き保存」ボタンが無い (origin=list の上書きモードになっていない)。");
-  await page.evaluate(() => {
-    const ta = document.querySelector("textarea");
+  const preSave = await page.evaluate(() => {
+    const ta = document.querySelector(".ocr-modal textarea");
     ta.value = ta.value + " REOCR-777";
     ta.dispatchEvent(new Event("input", { bubbles: true }));
+    return { textareas: document.querySelectorAll("textarea").length, modalVal: ta.value };
   });
+  log("Step 5e pre-save: #textareas=" + preSave.textareas + " modalVal=" + JSON.stringify(preSave.modalVal));
   await page.getByText("上書き保存", { exact: true }).click();
   await page.waitForFunction(() => document.querySelector("header .nav button.active") &&
     document.querySelector("header .nav button.active").textContent.includes("一覧"), { timeout: 8000 });
   await page.waitForSelector(".rec .txt", { timeout: 8000 });
+  // Wait for the overwrite to reflect in the list (guards any refresh timing).
+  let markerSeen = true;
+  try {
+    await page.waitForFunction(() =>
+      [...document.querySelectorAll(".rec .txt")].some((e) => /REOCR-777/.test(e.textContent)), null, { timeout: 8000 });
+  } catch (e) { markerSeen = false; }
   const afterOverwrite = await page.evaluate(() => ({
     count: document.querySelectorAll(".rec").length,
-    hasMarker: [...document.querySelectorAll(".rec .txt")].some((e) => /REOCR-777/.test(e.textContent))
+    txts: [...document.querySelectorAll(".rec .txt")].map((e) => e.textContent)
   }));
   if (afterOverwrite.count !== recCountBefore) {
     return fail("再認識の上書き保存で新しいカレンダー記録が増えた (" + recCountBefore + " -> " + afterOverwrite.count + ")。同一レコードを上書きすべき。");
   }
-  if (!afterOverwrite.hasMarker) return fail("再認識の上書き保存後、更新テキスト(REOCR-777)が一覧に反映されていない。");
+  if (!markerSeen) return fail("再認識の上書き保存後、更新テキスト(REOCR-777)が一覧に反映されていない。list txts: " + JSON.stringify(afterOverwrite.txts));
   log("Step 5e: 再読み取り -> 上書き保存で同一レコードを更新(件数不変・テキスト反映)。");
 
   // Overwrite persists across reload as the same single record (no dup entry).
   await page.reload({ waitUntil: "load" });
   await page.waitForSelector("header h1", { timeout: 10000 });
   await page.getByText("一覧", { exact: true }).click();
-  await page.waitForSelector(".rec .txt", { timeout: 8000 });
+  await openDayWithRecords();
   const overwritePersisted = await page.evaluate(() => ({
     count: document.querySelectorAll(".rec").length,
     marker: [...document.querySelectorAll(".rec .txt")].some((e) => /REOCR-777/.test(e.textContent))
@@ -699,7 +737,7 @@ async function main() {
 
   await selectMode("jpn");
   await expandCropToFull();
-  await page.getByText("この範囲を読み取る", { exact: true }).click();
+  await page.getByText("指定範囲", { exact: true }).click();
 
   try {
     await page.waitForSelector("textarea", { timeout: 150000 });
@@ -763,7 +801,7 @@ async function main() {
         });
       }, { text, filename, cjkFamily });
       await expandCropToFull();
-      await page.getByText("この範囲を読み取る", { exact: true }).click();
+      await page.getByText("指定範囲", { exact: true }).click();
       await page.waitForFunction(() => {
         const ta = document.querySelector("textarea");
         return ta && ta.value.trim().length > 0;
@@ -884,7 +922,7 @@ async function main() {
   await injectDataUrlFile(decoyDataUrl, "decoy-label.png");
   await selectMode("eng");
   await expandCropToFull();
-  await page.getByText("この範囲を読み取る", { exact: true }).click();
+  await page.getByText("指定範囲", { exact: true }).click();
   await assertResult("Decoy-Paddle-crop", "KX[-—_ ]?1234AB", "98765");
   const engineDecoy = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
   if (!/PaddleOCR/.test(engineDecoy)) return fail("Expected PaddleOCR engine for decoy cropped 英数字 path, got: " + engineDecoy);
@@ -941,7 +979,7 @@ async function main() {
   await injectDataUrlFile(wordSegDataUrl, "wordseg-label.png");
   await selectMode("eng");
   await expandCropToFull();
-  await page.getByText("この範囲を読み取る", { exact: true }).click();
+  await page.getByText("指定範囲", { exact: true }).click();
   await assertResult("WordSeg-Paddle-crop", "KX[-—_ ]?1234AB", "98765");
   const engineWordSeg = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
   if (!/PaddleOCR/.test(engineWordSeg)) return fail("Expected PaddleOCR engine for word-segmentation cropped 英数字 path, got: " + engineWordSeg);
@@ -1022,7 +1060,7 @@ async function main() {
   await injectDataUrlFile(barcodeDataUrl, "barcode-digits.png");
   await selectMode("eng");
   await expandCropToFull();
-  await page.getByText("この範囲を読み取る", { exact: true }).click();
+  await page.getByText("指定範囲", { exact: true }).click();
   await assertResult("Barcode-Paddle-crop", "901234", "567894");
   const engineBarcode = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
   if (!/PaddleOCR/.test(engineBarcode)) return fail("Expected PaddleOCR engine for barcode-neighbor cropped 英数字 path, got: " + engineBarcode);
@@ -1053,7 +1091,7 @@ async function main() {
   await injectDataUrlFile(noisyDataUrl, "noisy-label.png");
   await selectMode("eng");
   await expandCropToFull();
-  await page.getByText("この範囲を読み取る", { exact: true }).click();
+  await page.getByText("指定範囲", { exact: true }).click();
   await assertResult("Noise-Paddle-crop", "KX[-—_ ]?1234AB", "98765");
   const noisyPaddleText = await page.evaluate(() => document.querySelector("textarea").value);
   const engineNoisyPaddle = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
@@ -1101,7 +1139,7 @@ async function main() {
   await injectDataUrlFile(noisyDataUrl, "noisy-label-2.png");
   await selectMode("jpn");
   await expandCropToFull();
-  await page.getByText("この範囲を読み取る", { exact: true }).click();
+  await page.getByText("指定範囲", { exact: true }).click();
   await assertResult("Noise-jpn-Paddle-crop", "KX", "98765|1234");
   const noisyTessText = await page.evaluate(() => document.querySelector("textarea").value);
   const engineNoisyTess = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
@@ -1241,7 +1279,7 @@ async function main() {
       await dragHandle(".crop-handle.qh-" + key, tx, ty);
     }
   }
-  await page.getByText("この範囲を読み取る", { exact: true }).click();
+  await page.getByText("指定範囲", { exact: true }).click();
   await assertResult("Perspective-Paddle-quad", "KX[-—_ ]?1234AB", "98765");
   const enginePersp = await page.evaluate(() => { const e = document.querySelector(".engine b"); return e ? e.textContent : ""; });
   if (!/PaddleOCR/.test(enginePersp)) return fail("Expected PaddleOCR engine for perspective quad path, got: " + enginePersp);
@@ -1288,7 +1326,7 @@ async function main() {
   log("Step 18: 12°-rotated label injected (矩形 mode; relies on automatic deskew).");
   const deskewCountBefore = deskewMsgs.length;
   await expandCropToFull();
-  await page.getByText("この範囲を読み取る", { exact: true }).click();
+  await page.getByText("指定範囲", { exact: true }).click();
   await assertResult("Deskew-Paddle-crop", "KX[-—_ ]?1234AB", "98765");
   const deskewText = await page.evaluate(() => document.querySelector("textarea").value);
   const chosenAngle = deskewMsgs.slice(deskewCountBefore).join(" | ") || "(none captured)";
