@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-LQUoHaOeDqkV/0d3oJ1i/GQl/51ea4Oyp9xR0togMeg=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-Y2v4cKGX8NoNcNAZvNMQ/9GtlwRL1+a0tp7zQjHlJOw='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-MxGtTQvqEXgSWuSOp92imlRwrIj9myoCHaRegxS6Rdg=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-Y2v4cKGX8NoNcNAZvNMQ/9GtlwRL1+a0tp7zQjHlJOw='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
 <title>ラベルOCR</title>
 <style>
 :root{
@@ -168,15 +168,6 @@ details.acc .hint{ margin-top:0; }
 
   const LANG_MODE_KEY = "label_ocr_lang_mode";
 
-  // 全体読み取り方式 (full-image method): "classic" (従来 — DBNet detection +
-  // per-box rec, the DEFAULT) or "block" (ブロック解析 — pure-JS block
-  // segmentation, no detection model). Persisted like ocrMode / the word filter.
-  const FULL_METHOD_KEY = "label_ocr_full_method";
-  function loadFullMethod() {
-    try { return localStorage.getItem(FULL_METHOD_KEY) === "block" ? "block" : "classic"; }
-    catch (e) { return "classic"; }
-  }
-
   // ---- PaddleOCR (ONNX / onnxruntime-web) — the ONLY OCR engine ----
   // Both modes run entirely on ONNX Runtime Web + PaddleOCR models; Tesseract
   // has been retired. Pipelines:
@@ -226,14 +217,6 @@ details.acc .hint{ margin-top:0; }
   // unclip each box outward by distance = area * 1.6 / perimeter.
   const DET_MAX_SIDE = 960, DET_THRESH = 0.3, DET_BOX_THRESH = 0.5, DET_MIN_AREA = 9, DET_UNCLIP = 1.6;
   const DET_MEAN = [0.485, 0.456, 0.406], DET_STD = [0.229, 0.224, 0.225];
-
-  // ---- ブロック解析 (block-analysis full-image method) params ----
-  // A detection-MODEL-FREE alternative for 「全体を読み取る」: analyze the whole
-  // (deskewed) image at a capped resolution (long side <= this), take connected
-  // components of ink, keep character-like blobs, group them into text blocks by
-  // proximity, and route each block through the cropped-read pipeline. Needs no
-  // DBNet download — that is the point of offering it as a comparison method.
-  const BLOCK_MAX_SIDE = 1600;
 
   // ---- Pinned English wordlist (単語フィルタ dictionary check) ----
   // npm `word-list` (Sindre Sorhus): a plain lowercase words.txt, ~274k
@@ -1360,144 +1343,6 @@ details.acc .hint{ margin-top:0; }
     };
   }
 
-  // ---------------- Block analysis (ブロック解析 full-image method) ----------------
-  // A detection-MODEL-FREE segmentation for 「全体を読み取る」, offered as a
-  // second, user-selectable full-image method so the classic DBNet path and a
-  // genuinely different strategy can be compared by switching + re-reading.
-  // Pipeline: binarize the (deskewed) image at a capped resolution → connected
-  // components of ink → keep character-like blobs (drop specks, full-image
-  // bars/borders, extreme-aspect rules) → GROUP nearby blobs into text blocks by
-  // dilating each bbox (horizontally more than vertically, tied to the median
-  // blob height) and unioning overlaps (union-find) → order blocks in reading
-  // order → route EACH block rectangle through the SAME cropped-read pipeline
-  // 「この範囲を読み取る」 uses. Never triggers the DBNet det-model download.
-  // Returns block rectangles {x0,y0,x1,y1} in source pixels, in reading order.
-  function analyzeBlocks(src) {
-    const { w: fw, h: fh } = dims(src);
-    const scale = Math.min(1, BLOCK_MAX_SIDE / Math.max(fw, fh));
-    const aw = Math.max(1, Math.round(fw * scale)), ah = Math.max(1, Math.round(fh * scale));
-    const c = newCanvas(aw, ah);
-    c.getContext("2d").drawImage(src, 0, 0, aw, ah);
-    const d = c.getContext("2d").getImageData(0, 0, aw, ah).data;
-    const n = aw * ah;
-    // Grayscale + Otsu + polarity (same helpers/logic as findTextBands): text =
-    // ink is the minority class.
-    const gray = new Uint8Array(n), hist = new Uint32Array(256);
-    for (let i = 0; i < n; i++) {
-      const y = (d[i * 4] * 0.299 + d[i * 4 + 1] * 0.587 + d[i * 4 + 2] * 0.114) | 0;
-      gray[i] = y; hist[y]++;
-    }
-    const t = otsuThreshold(hist, n);
-    let dark = 0;
-    for (let i = 0; i < n; i++) if (gray[i] < t) dark++;
-    const textIsDark = dark <= n - dark;
-    const ink = new Uint8Array(n);
-    for (let i = 0; i < n; i++) { const isDark = gray[i] < t; ink[i] = (textIsDark ? isDark : !isDark) ? 1 : 0; }
-    // 4-connected components of ink (same flood-fill pattern as detectTextBoxes /
-    // suggestQuad), collecting each blob's bounding box + pixel count.
-    const visited = new Uint8Array(n);
-    const stack = new Int32Array(n);
-    const blobs = [];
-    for (let s = 0; s < n; s++) {
-      if (!ink[s] || visited[s]) continue;
-      let sp = 0; stack[sp++] = s; visited[s] = 1;
-      let minx = aw, maxx = 0, miny = ah, maxy = 0, cnt = 0;
-      while (sp > 0) {
-        const idx = stack[--sp];
-        const x = idx % aw, y = (idx / aw) | 0;
-        cnt++;
-        if (x < minx) minx = x; if (x > maxx) maxx = x;
-        if (y < miny) miny = y; if (y > maxy) maxy = y;
-        if (x > 0) { const m = idx - 1; if (ink[m] && !visited[m]) { visited[m] = 1; stack[sp++] = m; } }
-        if (x < aw - 1) { const m = idx + 1; if (ink[m] && !visited[m]) { visited[m] = 1; stack[sp++] = m; } }
-        if (y > 0) { const m = idx - aw; if (ink[m] && !visited[m]) { visited[m] = 1; stack[sp++] = m; } }
-        if (y < ah - 1) { const m = idx + aw; if (ink[m] && !visited[m]) { visited[m] = 1; stack[sp++] = m; } }
-      }
-      blobs.push({ x0: minx, y0: miny, x1: maxx + 1, y1: maxy + 1, cnt });
-    }
-    if (!blobs.length) return [];
-    // Median blob height (excluding near-full-image borders/bars) scales both
-    // the character-like filter and the grouping dilation.
-    const heights = [];
-    for (const b of blobs) {
-      const bw = b.x1 - b.x0, bh = b.y1 - b.y0;
-      if (bw >= 0.95 * aw || bh >= 0.95 * ah) continue;
-      heights.push(bh);
-    }
-    if (!heights.length) return [];
-    heights.sort((a, b) => a - b);
-    const mh = heights[heights.length >> 1] || 1;
-    const minArea = Math.max(4, (mh * 0.12) * (mh * 0.12));
-    const kept = [];
-    for (const b of blobs) {
-      const bw = b.x1 - b.x0, bh = b.y1 - b.y0;
-      if (bw >= 0.95 * aw || bh >= 0.95 * ah) continue;   // border / full-width bar
-      if (b.cnt < minArea) continue;                      // speck
-      if (bh < mh * 0.25 && bw < mh * 0.25) continue;     // tiny fleck
-      if (bh > mh * 6) continue;                          // vertical rule / merged column
-      const aspect = Math.max(bw, bh) / Math.max(1, Math.min(bw, bh));
-      if (aspect > 12 && bh < mh * 0.6) continue;         // thin horizontal rule / underline
-      kept.push(b);
-    }
-    if (!kept.length) return [];
-    // Proximity grouping: dilate each bbox (horizontal >> vertical, since text
-    // runs horizontally) and union overlapping boxes via union-find, so
-    // neighbouring characters/words on a line merge into one block while
-    // separate lines stay apart.
-    const dx = Math.max(2, Math.round(mh * 0.9));
-    const dy = Math.max(1, Math.round(mh * 0.35));
-    const dil = kept.map((b) => ({ x0: b.x0 - dx, y0: b.y0 - dy, x1: b.x1 + dx, y1: b.y1 + dy }));
-    const parent = kept.map((_, i) => i);
-    const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
-    for (let i = 0; i < kept.length; i++) {
-      for (let j = i + 1; j < kept.length; j++) {
-        const a = dil[i], b = dil[j];
-        if (a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1) parent[find(i)] = find(j);
-      }
-    }
-    const groups = new Map();
-    for (let i = 0; i < kept.length; i++) {
-      const r = find(i), b = kept[i];
-      let g = groups.get(r);
-      if (!g) { groups.set(r, { x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1 }); }
-      else { g.x0 = Math.min(g.x0, b.x0); g.y0 = Math.min(g.y0, b.y0); g.x1 = Math.max(g.x1, b.x1); g.y1 = Math.max(g.y1, b.y1); }
-    }
-    // Map blocks back to source pixels with small padding, then reading order.
-    const inv = 1 / scale;
-    const padA = Math.max(2, Math.round(mh * 0.3));
-    const rects = [];
-    for (const g of groups.values()) {
-      rects.push({
-        x0: clamp(Math.round((g.x0 - padA) * inv), 0, fw - 1),
-        y0: clamp(Math.round((g.y0 - padA) * inv), 0, fh - 1),
-        x1: clamp(Math.round((g.x1 + padA) * inv), 1, fw),
-        y1: clamp(Math.round((g.y1 + padA) * inv), 1, fh)
-      });
-    }
-    return groupReadingOrder(rects);
-  }
-
-  // 「全体を読み取る」・ブロック解析 method: pure-JS block segmentation (no DBNet),
-  // then recognize each block through the crop pipeline and join in reading
-  // order. If zero blocks survive, fall back to the whole image as one region
-  // (same as the classic zero-box fallback) — never a dead end.
-  async function paddleRecognizeBlocks(src, mode, onStatus) {
-    if (onStatus) onStatus("ブロックを解析中…", 0.5);
-    const blocks = analyzeBlocks(src);
-    if (!blocks.length) return await paddleRecognizeCrop(src, mode, onStatus);
-    if (onStatus) onStatus("認識中…", 0.8);
-    const parts = [], scores = [];
-    for (const b of blocks) {
-      const r = await paddleRecognizeCrop(subCanvas(src, b), mode, onStatus, true);
-      if (r.text && r.text.trim()) { parts.push(r.text); if (r.score != null) scores.push(r.score); }
-    }
-    if (onStatus) onStatus("完了", 1);
-    return {
-      text: parts.join("\n"),
-      score: scores.length ? scores.reduce((a, s) => a + s, 0) / scores.length : null
-    };
-  }
-
   // ---------------- Clipboard helpers ----------------
   async function copyText(text) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -1535,16 +1380,6 @@ details.acc .hint{ margin-top:0; }
         ocrMode.value = mode;
         try { localStorage.setItem(LANG_MODE_KEY, mode); } catch (e) { /* ignore */ }
       }
-      // 全体読み取り方式 (only affects 「全体を読み取る」). Default 従来 (classic).
-      const fullMethod = ref(loadFullMethod());
-      function setFullMethod(m) {
-        if (fullMethod.value === m) return;
-        fullMethod.value = m;
-        try { localStorage.setItem(FULL_METHOD_KEY, m); } catch (e) { /* ignore */ }
-      }
-      // Which full-image method produced the current result ("classic"/"block"),
-      // or "" for a cropped read — drives the result-screen marker.
-      const fullMethodUsed = ref("");
       const stage = ref("input");           // 'input' | 'crop' | 'processing' | 'result'
       const captureErr = ref("");
       const previewUrl = ref("");           // data URL for preview (also stored)
@@ -1646,7 +1481,6 @@ details.acc .hint{ margin-top:0; }
         ocrText.value = ""; ocrRawText.value = ""; ocrFilteredText.value = "";
         ocrConf.value = null; engineUsed.value = "";
         wordFilterOn.value = loadWordFilterPref();
-        fullMethodUsed.value = "";
         const mode = ocrMode.value;
         try {
           releaseOtherRec(mode); // bound memory: drop the inactive mode's rec model
@@ -1659,18 +1493,7 @@ details.acc .hint{ margin-top:0; }
               : maybeDeskew(cropFromBitmap(currentBitmap, cropRect.value));
             result = await paddleRecognizeCrop(cropCanvas, mode, setStatus);
           } else {
-            // 全体を読み取る: the user-selected method. 従来 (classic, default)
-            // runs DBNet detection; ブロック解析 runs pure-JS block segmentation
-            // (no detection-model download). Both route detected/segmented
-            // regions through the same cropped-read pipeline.
-            const deskewed = maybeDeskew(currentBitmap);
-            if (fullMethod.value === "block") {
-              result = await paddleRecognizeBlocks(deskewed, mode, setStatus);
-              fullMethodUsed.value = "block";
-            } else {
-              result = await paddleRecognizeFull(deskewed, mode, setStatus);
-              fullMethodUsed.value = "classic";
-            }
+            result = await paddleRecognizeFull(maybeDeskew(currentBitmap), mode, setStatus);
           }
           engineUsed.value = REC_CFG[mode] ? REC_CFG[mode].label : REC_CFG.eng.label;
           ocrConf.value = result.score != null ? Math.round(result.score * 100) : null;
@@ -1823,7 +1646,7 @@ details.acc .hint{ margin-top:0; }
       function discard() {
         stage.value = "input";
         previewUrl.value = ""; ocrText.value = ""; ocrRawText.value = ""; ocrFilteredText.value = "";
-        ocrConf.value = null; engineUsed.value = ""; fullMethodUsed.value = "";
+        ocrConf.value = null; engineUsed.value = "";
         progress.value = 0; progStatus.value = ""; currentBitmap = null;
       }
       function backToCrop() {
@@ -1988,15 +1811,7 @@ details.acc .hint{ margin-top:0; }
             h("div", { class: "btn-row", style: { marginTop: "12px" } }, [
               h("button", { class: "btn", onClick: () => runOcr(true) }, "この範囲を読み取る")
             ]),
-            // 全体読み取り方式 toggle — only affects the 全体を読み取る button below.
-            h("div", { class: "wfrow", style: { margin: "12px 2px 6px" } }, [
-              h("span", { class: "wflabel" }, "全体の読み取り方式"),
-              h("div", { class: "segctl", style: { margin: "0" } }, [
-                h("button", { class: fullMethod.value === "classic" ? "on" : "", onClick: () => setFullMethod("classic") }, "従来"),
-                h("button", { class: fullMethod.value === "block" ? "on" : "", onClick: () => setFullMethod("block") }, "ブロック解析")
-              ])
-            ]),
-            h("div", { class: "btn-row" }, [
+            h("div", { class: "btn-row", style: { marginTop: "10px" } }, [
               h("button", { class: "btn sec", onClick: () => runOcr(false) }, "全体を読み取る"),
               h("button", { class: "btn sec", onClick: discard }, "やり直す")
             ])
@@ -2006,16 +1821,12 @@ details.acc .hint{ margin-top:0; }
 
       function renderResult() {
         const engineName = engineUsed.value || "PaddleOCR";
-        // When 全体 was used, mark which full-image method produced the result so
-        // 従来 / ブロック解析 runs can be told apart when comparing.
-        const fullMarker = fullMethodUsed.value === "block" ? " · 全体:ブロック解析"
-          : fullMethodUsed.value === "classic" ? " · 全体:従来" : "";
         return h("div", {}, [
           captureErr.value ? h("div", { class: "err" }, captureErr.value) : null,
           h("div", { class: "card" }, [
             h("h2", { class: "sec" }, "認識結果 — 保存しますか？"),
             h("img", { class: "preview", src: previewUrl.value, alt: "撮影した画像" }),
-            h("div", { class: "engine" }, ["エンジン: ", h("b", {}, engineName), fullMarker]),
+            h("div", { class: "engine" }, ["エンジン: ", h("b", {}, engineName)]),
             ocrConf.value != null ? h("div", { class: "conf" }, "信頼度: " + ocrConf.value + "%") : null,
             h("div", { class: "wfrow" }, [
               h("span", { class: "wflabel" }, "単語フィルタ"),
@@ -2075,7 +1886,7 @@ details.acc .hint{ margin-top:0; }
             h("button", { class: "btn sec", onClick: pasteFromClipboard }, "クリップボードから貼り付け"),
             h("details", { class: "acc" }, [
               h("summary", {}, "撮影のコツ"),
-              h("div", { class: "hint" }, "型番・製造番号のシールを大きく、明るく撮影すると精度が上がります。撮影後に読み取る範囲を選べます。斜めから撮った場合は「台形補正」で四隅を合わせると歪みを補正できます（傾きは自動で補正されます）。画像をコピーして Ctrl/Cmd+V でも貼り付けできます。「全体を読み取る」は方式を選べます（従来＝文字検出／ブロック解析＝検出モデル不要の軽量版）。方式を切り替えて読み直すと結果を比べられます。")
+              h("div", { class: "hint" }, "型番・製造番号のシールを大きく、明るく撮影すると精度が上がります。撮影後に読み取る範囲を選べます。斜めから撮った場合は「台形補正」で四隅を合わせると歪みを補正できます（傾きは自動で補正されます）。画像をコピーして Ctrl/Cmd+V でも貼り付けできます。")
             ])
           ])
         ]);
