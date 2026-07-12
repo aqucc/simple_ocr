@@ -758,29 +758,36 @@ async function main() {
   await page.waitForSelector("header h1", { timeout: 10000 });
   await page.getByText("カレンダー", { exact: true }).click();
   await openDayWithRecords();                                   // calendar -> tap day -> day view
-  await page.setViewportSize(SE2);
-  await page.waitForTimeout(150);
-  const scroll = await page.evaluate(() => {
-    const main = document.querySelector("main");
-    const head = document.querySelector(".listcol .listhead");
-    const bodyEl = document.querySelector(".listcol .listbody");
-    const toggleInHead = !!document.querySelector(".listcol .listhead .viewtoggle");
-    const navInHead = !!document.querySelector(".listcol .listhead .navrow");
-    return {
-      recCount: document.querySelectorAll(".rec").length,
-      mainOverflow: main ? main.scrollHeight - main.clientHeight : -1,
-      bodyOverflow: bodyEl ? bodyEl.scrollHeight - bodyEl.clientHeight : -1,
-      hasHead: !!head, hasBody: !!bodyEl, toggleInHead, navInHead
-    };
-  });
-  await page.setViewportSize(BIG);
-  log("Step 5g: day-view scroll — recCount=" + scroll.recCount + " mainOverflow=" + scroll.mainOverflow +
-    " bodyOverflow=" + scroll.bodyOverflow + " head=" + scroll.hasHead + " toggleInHead=" + scroll.toggleInHead);
-  if (!scroll.hasHead || !scroll.hasBody) return fail("Day view is not split into a fixed .listhead and a scrolling .listbody.");
-  if (!scroll.toggleInHead || !scroll.navInHead) return fail("The view toggle / prev-next nav are not in the fixed .listhead.");
-  if (scroll.bodyOverflow <= 2) return fail("Day view .listbody did not become scrollable with many records (overflow=" + scroll.bodyOverflow + ").");
-  if (scroll.mainOverflow > 2) return fail("Day view <main> itself scrolls (" + scroll.mainOverflow + "px); only the records (.listbody) should scroll.");
-  log("Step 5g: nav stays fixed (.listhead); only the records scroll (.listbody scrollable, <main> not).");
+  // Assert the current listcol view keeps a fixed .listhead (toggle+nav) and
+  // scrolls only .listbody; <main> must not scroll.
+  const assertListScroll = async (modeName) => {
+    await page.setViewportSize(SE2);
+    await page.waitForTimeout(150);
+    const s = await page.evaluate(() => {
+      const main = document.querySelector("main");
+      const bodyEl = document.querySelector(".listcol .listbody");
+      return {
+        recCount: document.querySelectorAll(".rec").length,
+        mainOverflow: main ? main.scrollHeight - main.clientHeight : -1,
+        bodyOverflow: bodyEl ? bodyEl.scrollHeight - bodyEl.clientHeight : -1,
+        hasHead: !!document.querySelector(".listcol .listhead"), hasBody: !!bodyEl,
+        toggleInHead: !!document.querySelector(".listcol .listhead .viewtoggle"),
+        navInHead: !!document.querySelector(".listcol .listhead .navrow")
+      };
+    });
+    await page.setViewportSize(BIG);
+    log("Step 5g[" + modeName + "]: recCount=" + s.recCount + " mainOverflow=" + s.mainOverflow + " bodyOverflow=" + s.bodyOverflow);
+    if (!s.hasHead || !s.hasBody) return fail(modeName + " view: not split into a fixed .listhead and a scrolling .listbody.");
+    if (!s.toggleInHead || !s.navInHead) return fail(modeName + " view: the toggle / prev-next nav are not in the fixed .listhead.");
+    if (s.bodyOverflow <= 2) return fail(modeName + " view: .listbody did not become scrollable with many records (overflow=" + s.bodyOverflow + ").");
+    if (s.mainOverflow > 2) return fail(modeName + " view: <main> itself scrolls (" + s.mainOverflow + "px); only .listbody should.");
+  };
+  await assertListScroll("日単位");
+  // Same for the 月単位 view (records under the month grouping).
+  await page.locator(".viewtoggle").getByText("月単位", { exact: true }).click();
+  await page.waitForSelector(".datehdr-link", { timeout: 8000 });
+  await assertListScroll("月単位");
+  log("Step 5g: nav stays fixed (.listhead) and only the records scroll (.listbody) in both 日単位 and 月単位.");
 
   // ---- Japanese OCR mode ----
   const cjkFamily = detectCjkFont();
