@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-srqBwn63LJDi0xA+exkwdBZigm827rtHtOyu+Ztya+E=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-bH914jLWgoQsbCPCisn2VG7e+Y2IGhGWMv6anBtuxmI='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-srqBwn63LJDi0xA+exkwdBZigm827rtHtOyu+Ztya+E=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-P/uYy/ItY8Quymcs7ANoFwF1Bwb8VG1kzQnCGeZlM7U='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
 <title>ラベルOCR</title>
 <style>
 :root{
@@ -130,7 +130,7 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
    none で listbody 自身のラバーバンド(ふわふわ)も止める。 */
 .listcol{ flex:1 1 auto; min-height:0; display:flex; flex-direction:column; }
 .listcol .listhead{ flex:0 0 auto; }
-.listcol .listbody{ flex:1 1 auto; min-height:0; overflow-y:auto;
+.listcol .listbody{ flex:1 1 auto; min-height:0; overflow-y:auto; overflow-x:hidden;
   overscroll-behavior:none; -webkit-overflow-scrolling:touch; }
 /* Weekday header row: fixed height. Day grid: fills remaining height with the
    week rows sharing it (minmax(0,1fr)), so cells shrink to fit -- no scroll. */
@@ -150,10 +150,12 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
 .calcell.sel .caldot{ background:#fff; color:var(--accent); }
 .datehdr{ font-size:14px; font-weight:700; color:var(--muted); margin:16px 2px 8px;
   padding-bottom:6px; border-bottom:1px solid var(--line); }
-/* Tappable date header in the 月単位 list (jumps to that day's 日単位 view). */
+/* Tappable date header in the 月単位 list (jumps to that day's 日単位 view).
+   margin:...0... on the sides -- with width:100% a 2px side margin (inherited
+   from .datehdr) would make the margin-box 100%+4px and scroll horizontally. */
 .datehdr-link{ display:block; width:100%; text-align:left; background:transparent;
   border:none; border-bottom:1px solid var(--line); color:var(--accent);
-  cursor:pointer; margin-top:12px; min-height:40px; }
+  cursor:pointer; margin:12px 0 8px; min-height:40px; }
 /* A record groups its controls by target:
    ・写真カラム(.photo): サムネイル(拡大) + その画像の再読取
    ・本文(.body): テキスト + そのテキストのコピー/編集

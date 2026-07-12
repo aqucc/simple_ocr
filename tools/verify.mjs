@@ -777,21 +777,27 @@ async function main() {
     const s = await page.evaluate(() => {
       const main = document.querySelector("main");
       const bodyEl = document.querySelector(".listcol .listbody");
+      const de = document.documentElement;
       return {
         recCount: document.querySelectorAll(".rec").length,
         mainOverflow: main ? main.scrollHeight - main.clientHeight : -1,
         bodyOverflow: bodyEl ? bodyEl.scrollHeight - bodyEl.clientHeight : -1,
+        bodyHOverflow: bodyEl ? bodyEl.scrollWidth - bodyEl.clientWidth : -1,
+        docHOverflow: de.scrollWidth - de.clientWidth,
         hasHead: !!document.querySelector(".listcol .listhead"), hasBody: !!bodyEl,
         toggleInHead: !!document.querySelector(".listcol .listhead .viewtoggle"),
         navInHead: !!document.querySelector(".listcol .listhead .navrow")
       };
     });
     await page.setViewportSize(BIG);
-    log("Step 5g[" + modeName + "]: recCount=" + s.recCount + " mainOverflow=" + s.mainOverflow + " bodyOverflow=" + s.bodyOverflow);
+    log("Step 5g[" + modeName + "]: recCount=" + s.recCount + " mainOverflow=" + s.mainOverflow +
+      " bodyOverflow=" + s.bodyOverflow + " bodyHOverflow=" + s.bodyHOverflow + " docHOverflow=" + s.docHOverflow);
     if (!s.hasHead || !s.hasBody) return fail(modeName + " view: not split into a fixed .listhead and a scrolling .listbody.");
     if (!s.toggleInHead || !s.navInHead) return fail(modeName + " view: the toggle / prev-next nav are not in the fixed .listhead.");
     if (s.bodyOverflow <= 2) return fail(modeName + " view: .listbody did not become scrollable with many records (overflow=" + s.bodyOverflow + ").");
     if (s.mainOverflow > 2) return fail(modeName + " view: <main> itself scrolls (" + s.mainOverflow + "px); only .listbody should.");
+    if (s.bodyHOverflow > 2) return fail(modeName + " view: .listbody scrolls HORIZONTALLY (" + s.bodyHOverflow + "px); it should not.");
+    if (s.docHOverflow > 2) return fail(modeName + " view: the document overflows horizontally (" + s.docHOverflow + "px).");
   };
   await assertListScroll("日単位");
   // Same for the 月単位 view (records under the month grouping).
