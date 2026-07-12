@@ -561,6 +561,17 @@ async function main() {
   log("Step 4a: 「カレンダー」タブでカレンダー画面＋日バッジを表示。");
   // SE2 gate: the calendar screen must fit without scrolling.
   await checkSE2("calendar", "main");
+  // The calendar must SHRINK to fit an even shorter viewport (never scroll).
+  await page.setViewportSize({ width: 375, height: 470 });
+  await page.waitForTimeout(150);
+  const calShort = await page.evaluate(() => {
+    const m = document.querySelector("main");
+    return { over: m ? m.scrollHeight - m.clientHeight : -1, cells: document.querySelectorAll(".calgrid .calcell").length };
+  });
+  await page.setViewportSize(BIG);
+  if (calShort.cells < 28) return fail("Calendar grid not rendered at the short viewport (cells=" + calShort.cells + ").");
+  if (calShort.over > 2) return fail("Calendar does not shrink to fit a 375x470 viewport (main overflow " + calShort.over + "px).");
+  log("Step 4a2: calendar shrinks to fit a short (375x470) viewport without scrolling.");
 
   // ---- List-mode transitions via the [カレンダー | 月単位 | 日単位] toggle ----
   // calendar -> 月単位 (month list).

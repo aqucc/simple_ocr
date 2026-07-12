@@ -35,7 +35,7 @@
 - **認識モーダル**: `position:fixed; inset:0`。上部バー（タイトル＋✕）＋ `.modalbody`（`flex:1; min-height:0`）。撮影/一覧タブは含めない。
 - **切り抜き画像**: オーバーレイの %座標が画像に 1:1 対応する必要があるため、ステージ自体に画像の表示ボックス（px）を与えて実寸化（`cropDisplay`）。表示ボックスは「カード幅」と「ビューポート高の約42%」の小さい方に合わせて縦横比を保って縮小。縦長画像でも収まる。
 - **結果画面**: カードを flex 縦積みにし、テキスト欄が余白を吸収（`min-height:64px` から伸縮）。プレビューは `max-height:22svh`。
-- **一覧**: カレンダー画面は1画面に収まる（`checkSE2` は `main` を no-scroll 判定）。**月単位・日単位は上部ナビ（切替トグル＋月/日移動）を固定し、記録リストだけをスクロール**する。`<main>` を flex 縦積み（`display:flex; flex-direction:column`）にし、その中で `.listcol`（`flex:1; min-height:0`）を満たす。`.listhead`（`flex:none`）を固定、`.listbody`（`flex:1; overflow-y:auto; overscroll-behavior:none`）だけがスクロールするため `<main>` 自体はスクロールせず、リスト自身のラバーバンド（ふわふわ）も出さない。`height:100%` ではなく flex で高さを確定させるのは、Safari でも確実に効かせるため。
+- **一覧**: カレンダー画面は常に1画面（**スクロールさせない**）。`.cal` を flex 縦積みにし、曜日行は固定・日グリッド（`.calgrid`, `grid-auto-rows:minmax(0,1fr)`）が残り高さを分け合ってセルが縮むため、ビューポート高が多少低くても収まる（`checkSE2` は 553 と 375×470 の両方で `main` no-scroll を検証）。セルは正方形固定（`aspect-ratio`）をやめ、`min-height:34px` でタップ性は確保。**月単位・日単位は上部ナビ（切替トグル＋月/日移動）を固定し、記録リストだけをスクロール**する。`<main>` を flex 縦積み（`display:flex; flex-direction:column`）にし、その中で `.listcol`（`flex:1; min-height:0`）を満たす。`.listhead`（`flex:none`）を固定、`.listbody`（`flex:1; overflow-y:auto; overscroll-behavior:none`）だけがスクロールするため `<main>` 自体はスクロールせず、リスト自身のラバーバンド（ふわふわ）も出さない。`height:100%` ではなく flex で高さを確定させるのは、Safari でも確実に効かせるため。
 
 ## エンジン構成
 
