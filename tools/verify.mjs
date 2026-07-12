@@ -725,6 +725,63 @@ async function main() {
   if (!overwritePersisted.marker) return fail("再認識の上書きテキストが永続化されていない (IndexedDB)。");
   log("Step 5f: 上書き保存はリロード後も同一レコードとして永続化(件数不変)。");
 
+  // ---- Scroll behavior: in the day/month views the nav (toggle + prev/next)
+  // stays fixed and ONLY the records scroll. Inject several records on today so
+  // the list overflows, then at SE2 assert <main> does not scroll while the
+  // .listbody does, and the toggle lives in the fixed .listhead. ----
+  await page.evaluate(async () => {
+    const c = document.createElement("canvas"); c.width = 12; c.height = 12;
+    const img = c.toDataURL("image/png");
+    const now = new Date();
+    const pad = (n) => (n < 10 ? "0" + n : "" + n);
+    const dateKey = now.getFullYear() + "-" + pad(now.getMonth() + 1) + "-" + pad(now.getDate());
+    await new Promise((resolve, reject) => {
+      const req = indexedDB.open("label_ocr_db", 1);
+      req.onsuccess = () => {
+        const db = req.result;
+        const tx = db.transaction("records", "readwrite");
+        const os = tx.objectStore("records");
+        for (let k = 0; k < 8; k++) {
+          os.put({
+            id: "scroll-" + k + "-" + Math.random().toString(36).slice(2),
+            createdAt: new Date(now.getTime() - (k + 1) * 1000).toISOString(),
+            dateKey, text: "SCROLLTEST-" + k + "\nMODEL: KX-" + k, imageDataUrl: img
+          });
+        }
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      };
+      req.onerror = () => reject(req.error);
+    });
+  });
+  await page.reload({ waitUntil: "load" });
+  await page.waitForSelector("header h1", { timeout: 10000 });
+  await page.getByText("カレンダー", { exact: true }).click();
+  await openDayWithRecords();                                   // calendar -> tap day -> day view
+  await page.setViewportSize(SE2);
+  await page.waitForTimeout(150);
+  const scroll = await page.evaluate(() => {
+    const main = document.querySelector("main");
+    const head = document.querySelector(".listcol .listhead");
+    const bodyEl = document.querySelector(".listcol .listbody");
+    const toggleInHead = !!document.querySelector(".listcol .listhead .viewtoggle");
+    const navInHead = !!document.querySelector(".listcol .listhead .navrow");
+    return {
+      recCount: document.querySelectorAll(".rec").length,
+      mainOverflow: main ? main.scrollHeight - main.clientHeight : -1,
+      bodyOverflow: bodyEl ? bodyEl.scrollHeight - bodyEl.clientHeight : -1,
+      hasHead: !!head, hasBody: !!bodyEl, toggleInHead, navInHead
+    };
+  });
+  await page.setViewportSize(BIG);
+  log("Step 5g: day-view scroll — recCount=" + scroll.recCount + " mainOverflow=" + scroll.mainOverflow +
+    " bodyOverflow=" + scroll.bodyOverflow + " head=" + scroll.hasHead + " toggleInHead=" + scroll.toggleInHead);
+  if (!scroll.hasHead || !scroll.hasBody) return fail("Day view is not split into a fixed .listhead and a scrolling .listbody.");
+  if (!scroll.toggleInHead || !scroll.navInHead) return fail("The view toggle / prev-next nav are not in the fixed .listhead.");
+  if (scroll.bodyOverflow <= 2) return fail("Day view .listbody did not become scrollable with many records (overflow=" + scroll.bodyOverflow + ").");
+  if (scroll.mainOverflow > 2) return fail("Day view <main> itself scrolls (" + scroll.mainOverflow + "px); only the records (.listbody) should scroll.");
+  log("Step 5g: nav stays fixed (.listhead); only the records scroll (.listbody scrollable, <main> not).");
+
   // ---- Japanese OCR mode ----
   const cjkFamily = detectCjkFont();
   log(cjkFamily
