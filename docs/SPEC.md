@@ -143,13 +143,15 @@ script-src 'sha256-…(inline script)…' https://cdn.jsdelivr.net 'wasm-unsafe-
 style-src 'sha256-…(inline style)…';
 img-src 'self' blob: data:;
 connect-src 'self' https://cdn.jsdelivr.net data:;
-worker-src blob:;
+worker-src 'self' blob:;
+manifest-src 'self';
 base-uri 'none';
 form-action 'none'
 ```
 
 - `script-src`: インライン script（ハッシュ）、Vue 本体、onnxruntime-web の遅延ロード（`<script>` 挿入）と内部の動的 `import()`（いずれも jsdelivr）、WASM 実行（`wasm-unsafe-eval`）。
-- `worker-src blob:`: onnxruntime-web が内部で Blob URL の Worker を使う可能性に備える。
+- `worker-src 'self' blob:`: onnxruntime-web の Blob URL Worker、および同一オリジンの Service Worker（`sw.js`）登録用。
+- `manifest-src 'self'`: PWA の Web App Manifest（`manifest.webmanifest`）取得用。
 - `connect-src`: `'self'` は自己ホストの日本語モデル・辞書（`models/japan_rec.onnx` / `models/japan_dict.txt`、`fetch` 取得）用。`https://cdn.jsdelivr.net` は ONNX Runtime の `.wasm` / PP-OCRv4 検出・認識モデル・辞書、単語フィルタの `word-list` 取得用。`data:` は WASM の `data:` URI 取得用。
 - `img-src`: 保存画像・プレビュー（`data:` / `blob:`）。
 
@@ -164,6 +166,15 @@ node tools/update_csp_hash.mjs
 依存なしの素の Node が、インライン `<script>` と `<style>` の sha256 を計算して CSP メタタグの該当トークンを書き換える。
 
 > デプロイ時、Pages ワークフローは `<title>` の直前に `<meta name="app-version" content="<コミットSHA7桁>">` を挿入する（インライン script/style の中身は変えないため CSP ハッシュに影響しない）。アプリはこれをヘッダに小さく表示し、ブラウザキャッシュに旧版が残っていないかを可視化する。
+
+## PWA（ホーム画面に追加）
+
+インストール可能な PWA。ホーム画面から全画面（standalone）で起動できる。
+
+- **Web App Manifest**（`manifest.webmanifest`）: `display:standalone`、`start_url:index.html`、`scope:.`（プロジェクトページ `/simple_ocr/` のサブパスに合わせて相対指定）、`theme_color`/`background_color`、192/512 の PNG アイコン（`any`＋`maskable`）。iOS 向けに `apple-touch-icon`（180）と `apple-mobile-web-app-*` メタも指定。`theme-color` は `prefers-color-scheme` で明暗2つ。
+- **Service Worker**（`sw.js`, スコープ `/simple_ocr/`）: シェル（`index.html` ＋ manifest ＋アイコン）を precache し、ナビゲーションは network-first（オンライン時は常に最新、オフライン時のみキャッシュのシェル）。同一オリジン資産（`models/` など）は cache-first で実行時キャッシュ。OCR エンジン/モデル（数十MB, CDN）は precache せずネットワーク/ブラウザキャッシュに委ねる。**登録は HTTPS のみ**（HTTP のテストサーバでは登録しない）。
+- アイコンは `tools/make_icons.mjs`（Chromium で SVG→PNG）で生成。Pages ワークフローが manifest / `sw.js` / `icons/` を `_site` へ配置する。
+- 検証（`verify.mjs`）は manifest がロードでき（name/icons/`display:standalone`）、アイコンが 200、`apple-touch-icon` と web-app-capable メタが在ることを確認（CSP 違反ゼロも継続確認）。
 
 ## 依存（固定バージョン）
 

@@ -121,7 +121,11 @@ const MIME = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".mjs": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8"
+  ".css": "text/css; charset=utf-8",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".png": "image/png",
+  ".svg": "image/svg+xml"
 };
 function startServer() {
   const server = http.createServer((req, res) => {
@@ -288,6 +292,38 @@ async function main() {
   await page.goto(base + "/index.html", { waitUntil: "load" });
   await page.waitForSelector("header h1", { timeout: 10000 });
   log("Step 1: page loaded, Vue mounted (render functions, no template compiler).");
+
+  // ---- PWA: manifest + apple/home-screen meta present and loadable ----
+  const pwa = await page.evaluate(async () => {
+    const manifestLink = document.querySelector('link[rel="manifest"]');
+    const appleIcon = document.querySelector('link[rel="apple-touch-icon"]');
+    const capable = document.querySelector('meta[name="apple-mobile-web-app-capable"], meta[name="mobile-web-app-capable"]');
+    let manifest = null, manifestErr = null, iconStatus = null;
+    if (manifestLink) {
+      try {
+        const res = await fetch(manifestLink.href);
+        manifest = await res.json();
+        if (manifest && manifest.icons && manifest.icons[0]) {
+          const iu = new URL(manifest.icons[0].src, manifestLink.href).href;
+          iconStatus = (await fetch(iu)).status;
+        }
+      } catch (e) { manifestErr = String(e); }
+    }
+    return {
+      hasManifestLink: !!manifestLink, hasAppleIcon: !!appleIcon, hasCapable: !!capable,
+      manifest, manifestErr, iconStatus
+    };
+  });
+  if (!pwa.hasManifestLink) return fail("PWA: <link rel=manifest> missing.");
+  if (!pwa.hasAppleIcon) return fail("PWA: <link rel=apple-touch-icon> missing.");
+  if (!pwa.hasCapable) return fail("PWA: web-app-capable meta missing.");
+  if (!pwa.manifest) return fail("PWA: manifest.webmanifest did not load as JSON: " + pwa.manifestErr);
+  if (!pwa.manifest.name || !Array.isArray(pwa.manifest.icons) || pwa.manifest.icons.length === 0)
+    return fail("PWA: manifest missing name/icons. Got: " + JSON.stringify(pwa.manifest));
+  if (pwa.manifest.display !== "standalone") return fail("PWA: manifest display should be 'standalone', got: " + pwa.manifest.display);
+  if (pwa.iconStatus !== 200) return fail("PWA: manifest icon did not load (status " + pwa.iconStatus + ").");
+  log("Step 1a-pwa: manifest loads (name=" + pwa.manifest.name + ", " + pwa.manifest.icons.length +
+    " icons ok, display=" + pwa.manifest.display + "); apple-touch-icon + web-app-capable present.");
 
   // Mode/tips info now lives on the capture screen as a single collapsed
   // accordion ("モードと撮影のコツ"); it carries the jpn model download-size hint.

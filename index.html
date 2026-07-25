@@ -1,8 +1,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-srqBwn63LJDi0xA+exkwdBZigm827rtHtOyu+Ztya+E=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-P/uYy/ItY8Quymcs7ANoFwF1Bwb8VG1kzQnCGeZlM7U='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src blob:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-+oDvJI65T/5QnX9thk+BahDvauNu7SAmOKAMSokI/Fo=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-P/uYy/ItY8Quymcs7ANoFwF1Bwb8VG1kzQnCGeZlM7U='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src 'self' blob:; manifest-src 'self'; base-uri 'none'; form-action 'none'">
 <title>ラベルOCR</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#1a1d24" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ラベルOCR">
 <style>
 :root{
   --bg:#0f1115; --panel:#1a1d24; --panel2:#232732; --line:#2e3440;
@@ -2270,5 +2279,14 @@ details.acc .hint{ margin-top:0; }
   };
 
   createApp(App).mount("#app");
+
+  // PWA: register the service worker so the app is installable / opens from the
+  // home screen and the shell works offline. Only over HTTPS (production);
+  // skipped on the plain-HTTP test server to avoid caching across its reloads.
+  if ("serviceWorker" in navigator && location.protocol === "https:") {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("sw.js").catch(() => { /* non-fatal */ });
+    });
+  }
 })();
 </script>

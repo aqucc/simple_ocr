@@ -51,3 +51,4 @@
 | PaddleOCR | 検出（DBNet）＋認識（PP-OCRv4 / PP-OCRv3 japan） |
 | strict CSP | `unsafe-*` なし、インラインは sha256 許可 |
 | 単一HTML | 依存は CDN と自己ホストのモデルのみ |
+| PWA | ホーム画面に追加して全画面起動（manifest＋アイコン＋Service Worker） |
