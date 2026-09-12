@@ -1,7 +1,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-+oDvJI65T/5QnX9thk+BahDvauNu7SAmOKAMSokI/Fo=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-P/uYy/ItY8Quymcs7ANoFwF1Bwb8VG1kzQnCGeZlM7U='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src 'self' blob:; manifest-src 'self'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-oIpkbOo/KW15kzVaXszInyd1AWx48LQO1RCebB+gFzM=' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; style-src 'sha256-ACmGp7lAQhz1vbV0yo/D6t/Zjttv7/oVlAqSqui8MpA='; img-src 'self' blob: data:; connect-src 'self' https://cdn.jsdelivr.net data:; worker-src 'self' blob:; manifest-src 'self'; base-uri 'none'; form-action 'none'">
 <title>ラベルOCR</title>
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#1a1d24" media="(prefers-color-scheme: dark)">
@@ -181,18 +181,14 @@ h2.sec{ font-size:14px; color:var(--muted); margin:2px 2px 10px; font-weight:700
 .rec .time{ font-size:12px; color:var(--muted); }
 .rec .txt{ white-space:pre-wrap; word-break:break-word; font-family:ui-monospace,Menlo,monospace;
   font-size:14px; margin:4px 0 8px; }
-.rec .txt-acts{ display:flex; gap:8px; }
-.rec .txt-acts button{ flex:1; min-height:40px; border-radius:10px; border:1px solid var(--line);
+/* テキストコピー(そのテキストを写す)と 編集(モーダルで書き換える)は
+   別種の操作なので横並びにせず縦に積む。 */
+.rec .txt-acts{ display:flex; flex-direction:column; gap:8px; }
+.rec .txt-acts button{ width:100%; min-height:40px; border-radius:10px; border:1px solid var(--line);
   background:var(--panel2); color:var(--fg); font-size:14px; font-weight:600; }
 .rec .del-x{ position:absolute; top:0; right:0; width:32px; height:32px; border-radius:8px;
   border:1px solid var(--danger); background:rgba(255,90,95,.12); color:var(--danger);
   font-size:15px; line-height:1; }
-.rec textarea{ min-height:88px; font-size:14px; margin:4px 0 0; }
-.rec .editrow{ display:flex; gap:8px; margin-top:8px; }
-.rec .editrow button{ flex:1; min-height:44px; border-radius:10px; border:none;
-  font-size:14px; font-weight:700; }
-.rec .editrow button.save{ background:var(--ok); color:#fff; }
-.rec .editrow button.cancel{ background:var(--panel2); color:var(--fg); border:1px solid var(--line); }
 .empty-note{ text-align:center; color:var(--muted); padding:30px 10px; }
 .spinner{ width:20px; height:20px; border:3px solid rgba(255,255,255,.4);
   border-top-color:#fff; border-radius:50%; animation:spin .8s linear infinite; }
@@ -1745,17 +1741,19 @@ details.acc .hint{ margin-top:0; }
         window.removeEventListener("pointercancel", onQuadUp);
       }
 
-      async function saveRecord() {
+      // asNew=true で、再認識(一覧由来)でも元を上書きせず新規レコードとして追加する。
+      async function saveRecord(asNew) {
         try {
-          const target = ocrTargetRec.value;
+          const target = asNew ? null : ocrTargetRec.value;
           let landedKey;
           if (target) {
-            // 一覧からの再認識: 同じレコードを上書き。id/createdAt/dateKey と
+            // 一覧からの再認識(上書き): 同じレコードを上書き。id/createdAt/dateKey と
             // 元画像はそのまま保持し、テキストだけ差し替える(カレンダーに
             // 新規エントリを増やさない)。
             await dbPut(Object.assign({}, target, { text: ocrText.value }));
             landedKey = target.dateKey;
           } else {
+            // 撮影の新規保存、または再認識からの「新規保存」。
             const now = new Date();
             landedKey = localDateKey(now);
             await dbPut({
@@ -1997,7 +1995,7 @@ details.acc .hint{ margin-top:0; }
         return h("div", { class: "ocrscreen" }, [
           captureErr.value ? h("div", { class: "err" }, captureErr.value) : null,
           h("div", { class: "card resultcard" }, [
-            h("h2", { class: "sec" }, overwrite ? "認識結果 — 上書き保存しますか？" : "認識結果 — 保存しますか？"),
+            h("h2", { class: "sec" }, overwrite ? "認識結果 — 上書き / 新規で保存" : "認識結果 — 保存しますか？"),
             h("img", { class: "preview compact", src: previewUrl.value, alt: "撮影した画像" }),
             h("div", { class: "engine" }, [
               "エンジン: ", h("b", {}, engineName),
@@ -2015,13 +2013,25 @@ details.acc .hint{ margin-top:0; }
               onInput: (e) => { ocrText.value = e.target.value; },
               spellcheck: "false"
             }),
-            // キャンセル / 再読取 / 保存 を横1列に(テキスト欄を広く取るため)。
-            // 保存とキャンセルは離して配置し、誤タップを避ける(間に再読取)。
-            h("div", { class: "btn-row triple", style: { marginTop: "12px" } }, [
-              h("button", { class: "btn sec", onClick: cancelOcr }, "キャンセル"),
-              h("button", { class: "btn line", onClick: backToCrop }, "再読取"),
-              h("button", { class: "btn ok", onClick: saveRecord }, overwrite ? "上書き保存" : "保存する")
-            ])
+            // キャンセルは必ず左端。撮影の新規は1列(キャンセル/再読取/保存する)。
+            // 再認識は上書きと新規の2択があるので、行を分ける
+            // (上段: キャンセル/再読取、下段: 上書き保存/新規保存)。
+            overwrite
+              ? h("div", {}, [
+                  h("div", { class: "btn-row", style: { marginTop: "12px" } }, [
+                    h("button", { class: "btn sec", onClick: cancelOcr }, "キャンセル"),
+                    h("button", { class: "btn line", onClick: backToCrop }, "再読取")
+                  ]),
+                  h("div", { class: "btn-row", style: { marginTop: "10px" } }, [
+                    h("button", { class: "btn ok", onClick: () => saveRecord(false) }, "上書き保存"),
+                    h("button", { class: "btn line", onClick: () => saveRecord(true) }, "新規保存")
+                  ])
+                ])
+              : h("div", { class: "btn-row triple", style: { marginTop: "12px" } }, [
+                  h("button", { class: "btn sec", onClick: cancelOcr }, "キャンセル"),
+                  h("button", { class: "btn line", onClick: backToCrop }, "再読取"),
+                  h("button", { class: "btn ok", onClick: () => saveRecord(false) }, "保存する")
+                ])
           ])
         ]);
       }
@@ -2066,44 +2076,58 @@ details.acc .hint{ margin-top:0; }
       }
 
       function renderRecord(rec) {
-        const isEditing = editingId.value === rec.id;
         // グループ化:
         //  ・写真(サムネイル=拡大) と 再読取 を左カラムに束ねる
-        //  ・テキスト に コピー / 編集 を束ねる(本文カラム)
+        //  ・テキスト に「テキストコピー」と「編集」を縦に(横並びの対ではない)
         //  ・削除 は項目自体の操作なので右上に独立配置(✕)
-        // 編集中は誤タップ防止のため、再読取/コピー/編集/削除を出さない。
+        // 編集はフルスクリーンのモーダルで行う(renderEditModal)。
         const photoCol = h("div", { class: "photo" }, [
           h("img", {
             class: "thumb", src: rec.imageDataUrl, alt: "保存した画像(タップで拡大)",
             onClick: () => { lightboxUrl.value = rec.imageDataUrl; }
           }),
-          isEditing ? null : h("button", { class: "reread", onClick: () => reOcrRecord(rec) }, "再読取")
+          h("button", { class: "reread", onClick: () => reOcrRecord(rec) }, "再読取")
         ]);
-        const body = isEditing
-          ? h("div", { class: "body" }, [
-              h("div", { class: "time" }, timeLabel(rec.createdAt)),
-              h("textarea", {
-                value: editText.value,
-                onInput: (e) => { editText.value = e.target.value; },
-                spellcheck: "false"
-              }),
-              h("div", { class: "editrow" }, [
-                h("button", { class: "save", onClick: () => saveEdit(rec) }, "保存"),
-                h("button", { class: "cancel", onClick: cancelEdit }, "キャンセル")
-              ])
-            ])
-          : h("div", { class: "body" }, [
-              h("div", { class: "time" }, timeLabel(rec.createdAt)),
-              h("div", { class: "txt" }, rec.text || "(テキストなし)"),
-              h("div", { class: "txt-acts" }, [
-                h("button", { onClick: () => copyRecord(rec) }, "コピー"),
-                h("button", { onClick: () => startEdit(rec) }, "編集")
-              ])
-            ]);
+        const body = h("div", { class: "body" }, [
+          h("div", { class: "time" }, timeLabel(rec.createdAt)),
+          h("div", { class: "txt" }, rec.text || "(テキストなし)"),
+          h("div", { class: "txt-acts" }, [
+            h("button", { class: "txtcopy", onClick: () => copyRecord(rec) }, "テキストコピー"),
+            h("button", { class: "editbtn", onClick: () => startEdit(rec) }, "編集")
+          ])
+        ]);
         return h("div", { class: "rec", key: rec.id }, [
-          isEditing ? null : h("button", { class: "del-x", onClick: () => deleteRecord(rec), "aria-label": "削除" }, "✕"),
+          h("button", { class: "del-x", onClick: () => deleteRecord(rec), "aria-label": "削除" }, "✕"),
           photoCol,
           body
+        ]);
+      }
+
+      // 編集は「アイテム1件」を対象にフルスクリーンのモーダルで行う。テキスト欄は
+      // 画面いっぱいに広がる。キャンセルは左、保存は右。
+      function renderEditModal() {
+        const rec = records.value.find((r) => r.id === editingId.value);
+        if (!rec) return null;
+        return h("div", { class: "ocr-modal editmodal" }, [
+          h("div", { class: "modalbar" }, [
+            h("span", { class: "mtitle" }, "テキストを編集"),
+            h("button", { class: "modalclose", onClick: cancelEdit, "aria-label": "閉じる" }, "✕")
+          ]),
+          h("div", { class: "modalbody" }, [
+            h("div", { class: "ocrscreen" }, [
+              h("div", { class: "card resultcard" }, [
+                h("textarea", {
+                  value: editText.value,
+                  onInput: (e) => { editText.value = e.target.value; },
+                  spellcheck: "false"
+                }),
+                h("div", { class: "btn-row", style: { marginTop: "12px" } }, [
+                  h("button", { class: "btn sec", onClick: cancelEdit }, "キャンセル"),
+                  h("button", { class: "btn ok", onClick: () => saveEdit(rec) }, "保存")
+                ])
+              ])
+            ])
+          ])
         ]);
       }
 
@@ -2267,6 +2291,7 @@ details.acc .hint{ margin-top:0; }
         ]),
         h("main", {}, view.value === "capture" ? renderInput() : renderList()),
         ocrActive.value ? renderOcrModal() : null,
+        editingId.value ? renderEditModal() : null,
         lightboxUrl.value
           ? h("div", { class: "lightbox", onClick: () => { lightboxUrl.value = ""; } }, [
               h("img", { src: lightboxUrl.value, alt: "保存した画像" }),

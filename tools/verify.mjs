@@ -389,9 +389,16 @@ async function main() {
   await page.waitForSelector(".crop-stage", { timeout: 10000 });
   await checkSE2("crop-landscape", ".modalbody");
 
+  // キャンセルは必ず左端: crop screen action row starts with キャンセル.
+  const cropFirstBtn = await page.evaluate(() => {
+    const b = document.querySelector(".ocr-modal .btn-row .btn");
+    return b ? b.textContent.trim() : "";
+  });
+  if (cropFirstBtn !== "キャンセル") return fail("Crop screen: left-most action button must be キャンセル, got: " + cropFirstBtn);
+
   // ---- cropped 英数字 path -> PaddleOCR (rec-only) ----
   await expandCropToFull();
-  log("Step 2b: crop rect expanded to full photo via pointer-event drags.");
+  log("Step 2b: crop rect expanded to full photo via pointer-event drags (キャンセル is left-most).");
   await page.getByText("指定範囲読取", { exact: true }).click();
   const assertResult = async (label, reKx, reOther) => {
     try {
@@ -486,6 +493,13 @@ async function main() {
   if (!/PaddleOCR/.test(engine1)) return fail("Expected PaddleOCR engine for cropped 英数字 path, got: " + engine1);
   const recognized = await page.evaluate(() => document.querySelector("textarea").value);
   log("Step 3: cropped-region OCR via " + engine1 + " matched. Recognized:\n  " + recognized.replace(/\n/g, "\\n"));
+
+  // キャンセルは必ず左端: result screen action row starts with キャンセル.
+  const resultFirstBtn = await page.evaluate(() => {
+    const b = document.querySelector(".ocr-modal .btn-row .btn");
+    return b ? b.textContent.trim() : "";
+  });
+  if (resultFirstBtn !== "キャンセル") return fail("Result screen: left-most action button must be キャンセル, got: " + resultFirstBtn);
 
   // SE2 no-scroll gate: recognition RESULT screen (flex-fill card).
   await checkSE2("result", ".modalbody");
@@ -654,32 +668,36 @@ async function main() {
   if (!persisted) return fail("Record did not persist across reload (IndexedDB).");
   log("Step 5: record persisted across reload (IndexedDB); 一覧→カレンダー→日選択で表示。");
 
-  // ---- edit flow: 編集 -> textarea (pre-filled) -> 保存 -> list + persistence ----
+  // ---- edit flow: 編集 -> full-screen edit modal (tall textarea) -> 保存 ----
   await page.getByText("編集", { exact: true }).click();
-  await page.waitForSelector(".rec textarea", { timeout: 5000 });
-  const prefilledOk = await page.evaluate(() => {
-    const ta = document.querySelector(".rec textarea");
-    return !!ta && /KX/i.test(ta.value) && /98765/.test(ta.value);
+  await page.waitForSelector(".editmodal textarea", { timeout: 5000 });
+  const editModal = await page.evaluate(() => {
+    const ta = document.querySelector(".editmodal textarea");
+    const btns = [...document.querySelectorAll(".editmodal .btn-row .btn")].map((b) => b.textContent.trim());
+    return {
+      prefilled: !!ta && /KX/i.test(ta.value) && /98765/.test(ta.value),
+      taHeight: ta ? ta.clientHeight : 0,
+      hasTabs: !!document.querySelector(".editmodal .nav"),
+      firstBtn: btns[0] || "", buttons: btns
+    };
   });
-  if (!prefilledOk) return fail("Edit textarea was not pre-filled with the record's existing text.");
-  // While editing, the other per-record actions (再読取/コピー/編集/削除) must
-  // not be rendered.
-  const otherActionsHidden = await page.evaluate(() =>
-    !document.querySelector(".rec .reread") &&
-    !document.querySelector(".rec .txt-acts") &&
-    !document.querySelector(".rec .del-x"));
-  if (!otherActionsHidden) return fail("再読取/コピー/編集/削除 were still present while a record was in edit mode.");
+  if (!editModal.prefilled) return fail("Edit modal textarea was not pre-filled with the record's text.");
+  if (editModal.hasTabs) return fail("Edit modal must not contain 撮影/カレンダー tabs.");
+  // The edit modal targets one item and should give a large (screen-filling) editor.
+  if (editModal.taHeight < 200) return fail("Edit modal textarea is too short (" + editModal.taHeight + "px); it should fill the screen.");
+  // Cancel must be the left-most button.
+  if (editModal.firstBtn !== "キャンセル") return fail("Edit modal: キャンセル must be the left-most button. Buttons: " + JSON.stringify(editModal.buttons));
   await page.evaluate(() => {
-    const ta = document.querySelector(".rec textarea");
+    const ta = document.querySelector(".editmodal textarea");
     ta.value = ta.value + " EDITED-999";
     ta.dispatchEvent(new Event("input", { bubbles: true }));
   });
-  await page.getByText("保存", { exact: true }).click();
-  await page.waitForFunction(() => !document.querySelector(".rec textarea"), { timeout: 5000 });
+  await page.locator(".editmodal").getByText("保存", { exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector(".editmodal"), { timeout: 5000 });
   const editShowsInList = await page.evaluate(() =>
     [...document.querySelectorAll(".rec .txt")].some((e) => /EDITED-999/.test(e.textContent)));
   if (!editShowsInList) return fail("Edited text was not reflected in the list after saving.");
-  log("Step 5a: 編集 -> textarea (pre-filled) -> 保存 updated the list text; other actions were hidden while editing.");
+  log("Step 5a: 編集 -> full-screen edit modal (tall textarea " + editModal.taHeight + "px, キャンセル left) -> 保存 updated the list.");
 
   await page.reload({ waitUntil: "load" });
   await page.waitForSelector("header h1", { timeout: 10000 });
@@ -771,6 +789,24 @@ async function main() {
   if (overwritePersisted.count !== recCountBefore) return fail("再認識上書き後のレコード数がリロードで変化した。");
   if (!overwritePersisted.marker) return fail("再認識の上書きテキストが永続化されていない (IndexedDB)。");
   log("Step 5f: 上書き保存はリロード後も同一レコードとして永続化(件数不変)。");
+
+  // ---- 新規保存: re-read a saved record and save it as a NEW record ----
+  // (origin=list result offers 上書き保存 AND 新規保存; the latter must ADD an entry.)
+  await page.locator(".rec").getByText("再読取", { exact: true }).first().click();
+  await page.waitForSelector(".ocr-modal .crop-stage", { timeout: 10000 });
+  await expandCropToFull();
+  await page.getByText("指定範囲読取", { exact: true }).click();
+  await assertResult("Re-OCR-new", "KX[-—_ ]?1234AB", "98765");
+  const newBtn = await page.getByText("新規保存", { exact: true }).count();
+  if (newBtn < 1) return fail("再認識の結果画面に「新規保存」ボタンが無い。");
+  await page.getByText("新規保存", { exact: true }).click();
+  await page.waitForFunction(() => document.querySelector("header .nav button.active") &&
+    document.querySelector("header .nav button.active").textContent.includes("カレンダー"), { timeout: 8000 });
+  await page.waitForFunction((n) => document.querySelectorAll(".rec").length === n, recCountBefore + 1, { timeout: 8000 })
+    .catch(() => {});
+  const afterNew = await page.evaluate(() => document.querySelectorAll(".rec").length);
+  if (afterNew !== recCountBefore + 1) return fail("「新規保存」でレコードが1件増えていない (" + recCountBefore + " -> " + afterNew + ")。");
+  log("Step 5f2: 再読取 -> 新規保存で新しいレコードを追加(件数 " + recCountBefore + " -> " + afterNew + ")。");
 
   // ---- Scroll behavior: in the day/month views the nav (toggle + prev/next)
   // stays fixed and ONLY the records scroll. Inject several records on today so
